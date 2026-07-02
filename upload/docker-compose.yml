@@ -1,0 +1,105 @@
+version: '3.8'
+
+services:
+  # Document Exchange Server
+  document-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secure-doc-server
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./documents:/app/documents
+      - ./keys:/app/keys
+      - ./logs:/app/logs
+      - ./auth:/app/auth
+      - ./secure_storage:/app/secure_storage
+      - ./key_escrow:/app/key_escrow
+      - ./config:/app/config
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FLASK_ENV=production
+    networks:
+      - secure-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Monitoring Service (Prometheus)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    networks:
+      - secure-network
+    restart: unless-stopped
+
+  # Grafana for Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - secure-network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+
+  # Redis for Session Management
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - secure-network
+    restart: unless-stopped
+
+  # PostgreSQL for Metadata Storage
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=secure_docs
+      - POSTGRES_USER=secure_user
+      - POSTGRES_PASSWORD=secure_password
+    networks:
+      - secure-network
+    restart: unless-stopped
+
+networks:
+  secure-network:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  redis-data:
+  postgres-data:

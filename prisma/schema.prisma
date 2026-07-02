@@ -1,0 +1,110 @@
+// Secure Multi-Branch Document Exchange System - Database Schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Hierarchical organization: Headquarters -> Regional -> Department -> Sub-branch
+model Branch {
+  id          String   @id @default(cuid())
+  name        String
+  code        String   @unique
+  type        String   // HEADQUARTERS | REGIONAL | DEPARTMENT | SUB_BRANCH
+  region      String?
+  parentId    String?
+  parent      Branch?  @relation("BranchHierarchy", fields: [parentId], references: [id])
+  children    Branch[] @relation("BranchHierarchy")
+  keys        Key[]
+  sentDocs    Document[] @relation("SenderDocs")
+  receivedDocs Document[] @relation("RecipientDocs")
+  auditLogs   AuditLog[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([parentId])
+  @@index([type])
+}
+
+// Cryptographic key pairs (ECC P-521). Separate keys for ECDH (encryption) and ECDSA (signing).
+model Key {
+  id                 String   @id @default(cuid())
+  branchId           String
+  branch             Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  purpose            String   // ENCRYPTION | SIGNING
+  algorithm          String   // ECDSA-P521-SHA512 | ECDH-P521
+  curve              String   // secp521r1
+  publicKeyPem       String
+  encryptedPrivateKey String  // AES-256-GCM encrypted, base64
+  privateIv          String   // base64 IV used to encrypt the private key
+  fingerprint        String   // SHA-256 of public key DER
+  status             String   @default("ACTIVE") // ACTIVE | ROTATED | REVOKED
+  version            Int      @default(1)
+  createdAt          DateTime @default(now())
+  rotatedAt          DateTime?
+  // Back-relations for documents that used this key
+  sentDocuments      Document[] @relation("SenderKeyDocs")
+  receivedDocuments  Document[] @relation("RecipientKeyDocs")
+
+  @@index([branchId, purpose])
+  @@index([status])
+}
+
+// Encrypted document exchange packages
+model Document {
+  id                 String   @id @default(cuid())
+  name               String   // original filename
+  mimeType           String
+  originalSize       Int      // plaintext size in bytes
+  senderBranchId     String
+  senderBranch       Branch   @relation("SenderDocs", fields: [senderBranchId], references: [id])
+  recipientBranchId  String
+  recipientBranch    Branch   @relation("RecipientDocs", fields: [recipientBranchId], references: [id])
+  // Secure package metadata (ciphertext stored on disk)
+  storagePath        String   // relative path to encrypted ciphertext blob
+  ephemeralPublicKey String   // base64 ephemeral ECDH public key (DER)
+  encryptedSessionKey String  // base64 AES-GCM encrypted session key
+  sessionIv          String   // base64 IV for session key encryption
+  sessionAuthTag     String   // base64 GCM auth tag for session key encryption
+  docIv              String   // base64 IV (96-bit) for document AES-256-GCM
+  authTag            String   // base64 128-bit GCM auth tag
+  signature          String   // base64 ECDSA-SHA512 signature over ciphertext
+  senderKeyId        String   // signing key used
+  recipientKeyId     String   // encryption key used
+  senderKey          Key      @relation("SenderKeyDocs", fields: [senderKeyId], references: [id])
+  recipientKey       Key      @relation("RecipientKeyDocs", fields: [recipientKeyId], references: [id])
+  documentHash       String   // SHA-512 of plaintext (for integrity verification)
+  nonce              String   // 128-bit random nonce (replay protection)
+  packageVersion     String   @default("1.0")
+  status             String   @default("DELIVERED") // DELIVERED | DECRYPTED | FAILED
+  createdAt          DateTime @default(now())
+  decryptedAt        DateTime?
+  auditLogs          AuditLog[]
+
+  @@index([senderBranchId])
+  @@index([recipientBranchId])
+  @@index([createdAt])
+}
+
+// Immutable audit trail of all cryptographic operations
+model AuditLog {
+  id          String   @id @default(cuid())
+  action      String   // UPLOAD | DOWNLOAD | VERIFY | KEY_GEN | KEY_ROTATE | KEY_REVOKE | BRANCH_CREATE | SEED
+  actor       String   // branch code or "SYSTEM"
+  branchId    String?
+  branch      Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  documentId  String?
+  document    Document? @relation(fields: [documentId], references: [id])
+  status      String   // SUCCESS | FAILURE | WARNING
+  details     String   // JSON string with context
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  @@index([action])
+  @@index([createdAt])
+  @@index([branchId])
+}
