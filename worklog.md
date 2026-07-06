@@ -46,3 +46,29 @@ Stage Summary:
 - VLM screenshot review confirmed: professional dark navy + teal theme, clean layout, no overlaps or cut-off text, all sections display data properly.
 - Database: 14 branches, 28 keys, audit trail populated with UPLOAD/DOWNLOAD/SEED events.
 - Dev server runs on port 3000.
+
+---
+Task ID: 9-14
+Agent: main
+Task: Add real-time multi-client support — each branch as an independent connected client with live presence, instant document delivery, and dynamic branch joining.
+
+Work Log:
+- Created `mini-services/exchange-hub/` (port 3003): a socket.io hub that tracks online branch clients (presence) and broadcasts `document:delivered`, `document:sent`, `document:decrypted`, `branch:created`, `branch:online`, `branch:offline`, and `clients:list` events. The Next.js API server connects to it as a privileged "server" client via socket.io-client to forward server-side events (`server:notify`).
+- Created `src/lib/hub-client.ts`: a singleton server-side socket.io-client that the API routes use to notify the hub (best-effort, non-blocking).
+- Wired `hubNotify` into the document-upload, document-decrypt, and branch-create API routes.
+- Created `src/components/client-mode.tsx`: ClientModeProvider context that lets the user pick which branch they're operating as (persisted in localStorage). When an identity is chosen, it opens a socket.io connection to the hub via `io("/?XTransformPort=3003")`, emits `client:join`, and listens for all live events — pushing them as notifications.
+- Created `src/components/client-ui.tsx`: IdentitySelector (header dropdown), NotificationsBell (popover of live events), ConnectedClientsPanel (sidebar presence list).
+- Updated `src/app/page.tsx`: wrapped in ClientModeProvider, added identity selector + bell + FIPS badge to header, replaced the static "All systems secure" widget with the live ConnectedClientsPanel, footer shows the active client identity.
+- Updated `src/components/sections/documents.tsx`: when a client identity is active, the sender is locked to that identity, an Inbox/Outbox/All tab filter appears, and the list shows "to you"/"from you" badges. A 5s poll refreshes the inbox for live delivery.
+- Fixed bugs: empty-string SelectItem value (Radix rejects it → used `__none__` sentinel), React 19 `set-state-in-effect` lint (used lazy useState initializer + useRef for the socket), native input value setter for React 19 controlled inputs in the add-branch dialog.
+
+Stage Summary:
+- Exchange hub runs on port 3003; Next.js on port 3000. Both started. The frontend connects through Caddy (port 81) using `?XTransformPort=3003`.
+- Agent Browser end-to-end verification (through Caddy on port 81):
+  * Observer mode → page loads, sidebar shows "Select a branch identity to connect" hint.
+  * Picked DEPT-A1 → hub logged `branch online: DEPT-A1`, header shows "Live" badge, Connected Clients panel shows "DEPT-A1 (you)".
+  * Sent strategy.txt DEPT-A1 → DEPT-B1 → hub broadcast `document:delivered`, toast "encrypted & delivered" appeared.
+  * Switched identity to DEPT-B1 → hub logged `branch online: DEPT-B1`; Documents inbox shows strategy.txt with a "to you" badge; bell badge shows 9 live notifications.
+  * Added a new department DEPT-D1 via the Branches dialog → 15 branches total, DEPT-D1 appears in the topology tree with freshly provisioned ECC key pairs.
+- VLM screenshot review confirmed: client identity visible in header, "Live" connection indicator, Connected Clients panel (1 online), no errors.
+- ESLint passes clean. The server keeps running while clients join/leave and new branches are added — exactly the "independent clients, everyone connected, add departments through it" behavior requested.

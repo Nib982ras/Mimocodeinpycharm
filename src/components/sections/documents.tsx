@@ -33,7 +33,9 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
+import { useClientMode } from "@/components/client-mode";
 import { cn } from "@/lib/utils";
 
 const WORKFLOW_STEPS = [
@@ -46,7 +48,10 @@ const WORKFLOW_STEPS = [
   "Store & audit",
 ];
 
+type DocTab = "all" | "inbox" | "outbox";
+
 export function DocumentsSection() {
+  const { identity } = useClientMode();
   const [branches, setBranches] = useState<Branch[]>([]);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -61,6 +66,10 @@ export function DocumentsSection() {
   const [decrypting, setDecrypting] = useState<string | null>(null);
   const [verifyResult, setVerifyResult] = useState<{ name: string; signatureValid: boolean; hashValid: boolean; hash: string } | null>(null);
 
+  // Tab defaults to "inbox" when a client identity is active.
+  const [tab, setTab] = useState<DocTab>("all");
+  const [reloadTick, setReloadTick] = useState(0);
+
   const load = useCallback(async () => {
     const [b, d] = await Promise.all([api.branches(), api.documents()]);
     setBranches(b.branches);
@@ -71,6 +80,36 @@ export function DocumentsSection() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // When identity changes, default the tab and prefill the sender.
+  useEffect(() => {
+    if (identity) {
+      setTab("inbox");
+      setSenderId(identity.id);
+    } else {
+      setTab("all");
+      setSenderId("");
+    }
+  }, [identity]);
+
+  // Poll for new documents every 5s when in client mode (best-effort live refresh
+  // in addition to the socket-driven reload below).
+  useEffect(() => {
+    if (!identity) return;
+    const t = setInterval(() => setReloadTick((n) => n + 1), 5000);
+    return () => clearInterval(t);
+  }, [identity]);
+  useEffect(() => {
+    if (reloadTick > 0) load();
+  }, [reloadTick, load]);
+
+  // Filter documents by the active tab + client identity.
+  const filteredDocs = documents.filter((d) => {
+    if (!identity || tab === "all") return true;
+    if (tab === "inbox") return d.recipient.code === identity.code;
+    if (tab === "outbox") return d.sender.code === identity.code;
+    return true;
+  });
 
   const handleUpload = async () => {
     if (!file || !senderId || !recipientId) {
@@ -89,8 +128,9 @@ export function DocumentsSection() {
         description: `${res.document.name} secured with AES-256-GCM + ECDH-P521 + ECDSA-SHA512.`,
       });
       setFile(null);
-      setSenderId("");
+      // Keep sender locked to identity (if set); clear recipient for next dispatch.
       setRecipientId("");
+      if (!identity) setSenderId("");
       await load();
     } catch (e) {
       toast({ title: "Encryption failed", description: e instanceof Error ? e.message : "Unknown error", variant: "destructive" });
@@ -141,24 +181,34 @@ export function DocumentsSection() {
         <div className="p-4 md:p-5">
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-4 space-y-1.5">
-              <label className="text-xs font-medium text-slate-400">Sender branch</label>
-              <Select value={senderId} onValueChange={setSenderId}>
-                <SelectTrigger className="bg-slate-950/60 border-slate-700 text-slate-100"><SelectValue placeholder="Select sender" /></SelectTrigger>
-                <SelectContent className="bg-slate-900 border-slate-700 max-h-72">
-                  {branchOptions.map((b) => (
-                    <SelectItem key={b.id} value={b.id} className="text-slate-100 focus:bg-slate-800">
-                      <span className="font-mono text-xs text-emerald-400 mr-2">{b.code}</span>{b.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <label className="text-xs font-medium text-slate-400">
+                Sender branch {identity && <span className="text-emerald-400">· locked to your identity</span>}
+              </label>
+              {identity ? (
+                <div className="flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2">
+                  <Lock className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                  <span className="font-mono text-xs text-emerald-400">{identity.code}</span>
+                  <span className="text-xs text-slate-300 truncate">{identity.name}</span>
+                </div>
+              ) : (
+                <Select value={senderId} onValueChange={setSenderId}>
+                  <SelectTrigger className="bg-slate-950/60 border-slate-700 text-slate-100"><SelectValue placeholder="Select sender" /></SelectTrigger>
+                  <SelectContent className="bg-slate-900 border-slate-700 max-h-72">
+                    {branchOptions.map((b) => (
+                      <SelectItem key={b.id} value={b.id} className="text-slate-100 focus:bg-slate-800">
+                        <span className="font-mono text-xs text-emerald-400 mr-2">{b.code}</span>{b.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </div>
             <div className="md:col-span-4 space-y-1.5">
               <label className="text-xs font-medium text-slate-400">Recipient branch</label>
               <Select value={recipientId} onValueChange={setRecipientId}>
                 <SelectTrigger className="bg-slate-950/60 border-slate-700 text-slate-100"><SelectValue placeholder="Select recipient" /></SelectTrigger>
                 <SelectContent className="bg-slate-900 border-slate-700 max-h-72">
-                  {branchOptions.map((b) => (
+                  {branchOptions.filter((b) => b.id !== senderId).map((b) => (
                     <SelectItem key={b.id} value={b.id} className="text-slate-100 focus:bg-slate-800">
                       <span className="font-mono text-xs text-emerald-400 mr-2">{b.code}</span>{b.name}
                     </SelectItem>
@@ -250,8 +300,19 @@ export function DocumentsSection() {
       <Panel>
         <PanelHeader
           title="Secure Packages"
-          subtitle={`${documents.length} encrypted document${documents.length === 1 ? "" : "s"} in vault`}
+          subtitle={`${filteredDocs.length} encrypted document${filteredDocs.length === 1 ? "" : "s"}${identity ? ` · ${tab === "inbox" ? "your inbox" : tab === "outbox" ? "your outbox" : "vault"}` : " in vault"}`}
           icon={<Package className="h-4 w-4" />}
+          action={
+            identity ? (
+              <Tabs value={tab} onValueChange={(v) => setTab(v as DocTab)}>
+                <TabsList className="bg-slate-800/60 border border-slate-700 h-8">
+                  <TabsTrigger value="inbox" className="text-xs data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-300">Inbox</TabsTrigger>
+                  <TabsTrigger value="outbox" className="text-xs data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-300">Outbox</TabsTrigger>
+                  <TabsTrigger value="all" className="text-xs data-[state=active]:bg-emerald-500/20 data-[state=active]:text-emerald-300">All</TabsTrigger>
+                </TabsList>
+              </Tabs>
+            ) : undefined
+          }
         />
         <div className="p-2">
           {loading ? (
@@ -260,21 +321,28 @@ export function DocumentsSection() {
                 <div key={i} className="h-14 rounded-lg bg-slate-800/40 animate-pulse" />
               ))}
             </div>
-          ) : documents.length === 0 ? (
+          ) : filteredDocs.length === 0 ? (
             <EmptyState
               icon={<FileLock2 className="h-10 w-10" />}
-              title="No encrypted documents yet"
-              description="Use the form above to encrypt and dispatch your first secure document between branches."
+              title={identity && tab === "inbox" ? "Your inbox is empty" : identity && tab === "outbox" ? "You haven't sent any documents" : "No encrypted documents yet"}
+              description={identity && tab === "inbox" ? "Encrypted documents sent to your branch will appear here in real time." : "Use the form above to encrypt and dispatch a secure document between branches."}
             />
           ) : (
             <div className="divide-y divide-slate-800/70">
-              {documents.map((d) => (
+              {filteredDocs.map((d) => {
+                const isMineIn = identity && d.recipient.code === identity.code;
+                const isMineOut = identity && d.sender.code === identity.code;
+                return (
                 <div key={d.id} className="flex items-center gap-3 px-2 py-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-800 border border-slate-700">
                     {d.status === "DECRYPTED" ? <Unlock className="h-4 w-4 text-emerald-400" /> : <Lock className="h-4 w-4 text-amber-400" />}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-slate-200 truncate">{d.name}</div>
+                    <div className="text-sm font-medium text-slate-200 truncate flex items-center gap-2">
+                      {d.name}
+                      {isMineIn && <Badge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-300">to you</Badge>}
+                      {isMineOut && <Badge className="border-teal-500/30 bg-teal-500/10 text-teal-300">from you</Badge>}
+                    </div>
                     <div className="text-[11px] text-slate-500 font-mono flex items-center gap-1.5 flex-wrap">
                       <span className="text-emerald-400">{d.sender.code}</span>
                       <ArrowRight className="h-3 w-3" />
@@ -303,7 +371,8 @@ export function DocumentsSection() {
                     </Button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>

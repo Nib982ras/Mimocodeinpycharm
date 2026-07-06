@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { encryptDocument, decryptPrivateKey } from "@/lib/crypto";
 import { storeCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
+import { hubNotify } from "@/lib/hub-client";
 import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
@@ -141,6 +142,20 @@ export async function POST(req: Request) {
       workflow: "AES-256-GCM + ECDH-P521 + ECDSA-SHA512",
     },
     ipAddress: req.headers.get("x-forwarded-for") || undefined,
+  });
+
+  // Notify the exchange hub so the recipient client gets a live delivery event.
+  hubNotify({
+    type: "document:delivered",
+    recipientBranchId: recipient.id,
+    senderBranchId: sender.id,
+    document: {
+      id: doc.id,
+      name: doc.name,
+      sender: { code: sender.code, name: sender.name },
+      recipient: { code: recipient.code, name: recipient.name },
+      size: plaintext.length,
+    },
   });
 
   return NextResponse.json({

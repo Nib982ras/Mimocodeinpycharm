@@ -6,6 +6,7 @@ import {
   type KeyPairPem,
 } from "@/lib/crypto";
 import { recordAudit } from "@/lib/audit";
+import { hubNotify } from "@/lib/hub-client";
 
 export const dynamic = "force-dynamic";
 
@@ -88,6 +89,12 @@ export async function POST(req: Request) {
     branchId: branch.id,
     status: "SUCCESS",
     details: { code, name, type, region, parentId },
+  });
+
+  // Broadcast the new node to all connected clients so the topology updates live.
+  hubNotify({
+    type: "branch:created",
+    branch: { id: branch.id, code: branch.code, name: branch.name, type: branch.type },
   });
 
   return NextResponse.json({ ok: true, branch });

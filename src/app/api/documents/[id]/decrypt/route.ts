@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { decryptDocument, decryptPrivateKey } from "@/lib/crypto";
 import { readCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
+import { hubNotify } from "@/lib/hub-client";
 
 export const dynamic = "force-dynamic";
 
@@ -81,6 +82,19 @@ export async function POST(
         signatureValid: result.signatureValid,
         documentHashValid: result.documentHashValid,
         decryptedBytes: result.plaintext.length,
+      },
+    });
+
+    // Notify the hub so the sender gets a live "receipt confirmation".
+    hubNotify({
+      type: "document:decrypted",
+      senderBranchId: doc.senderBranchId,
+      document: {
+        id: doc.id,
+        name: doc.name,
+        sender: { code: doc.senderBranch.code, name: doc.senderBranch.name },
+        recipient: { code: doc.recipientBranch.code, name: doc.recipientBranch.name },
+        size: result.plaintext.length,
       },
     });
 

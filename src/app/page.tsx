@@ -19,6 +19,8 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
+import { ClientModeProvider, useClientMode } from "@/components/client-mode";
+import { IdentitySelector, NotificationsBell, ConnectedClientsPanel } from "@/components/client-ui";
 import { DashboardSection } from "@/components/sections/dashboard";
 import { DocumentsSection } from "@/components/sections/documents";
 import { BranchesSection } from "@/components/sections/branches";
@@ -51,8 +53,17 @@ const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
 };
 
 export default function Home() {
+  return (
+    <ClientModeProvider>
+      <Shell />
+    </ClientModeProvider>
+  );
+}
+
+function Shell() {
   const [section, setSection] = useState<SectionId>("dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const { identity } = useClientMode();
 
   const navigate = useCallback((id: SectionId) => {
     setSection(id);
@@ -108,13 +119,7 @@ export default function Home() {
             <div className="flex justify-between"><span>Signature</span><span className="text-emerald-300">ECDSA-S512</span></div>
           </div>
         </div>
-        <div className="flex items-center gap-2 px-2">
-          <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
-          </span>
-          <span className="text-[11px] text-slate-400">All systems secure</span>
-        </div>
+        <ConnectedClientsPanel />
       </div>
     </div>
   );
@@ -132,7 +137,7 @@ export default function Home() {
         {/* Main column */}
         <div className="flex-1 flex flex-col min-w-0 min-h-screen">
           <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/80 backdrop-blur supports-[backdrop-filter]:bg-slate-950/60">
-            <div className="flex items-center gap-3 px-4 md:px-6 py-4">
+            <div className="flex items-center gap-3 px-4 md:px-6 py-3.5">
               {/* Mobile menu */}
               <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
                 <SheetTrigger asChild>
@@ -153,9 +158,14 @@ export default function Home() {
                 <p className="text-xs md:text-sm text-slate-400 leading-tight truncate">{meta.subtitle}</p>
               </div>
 
-              <div className="hidden sm:flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5">
-                <ShieldCheck className="h-4 w-4 text-emerald-400" />
-                <span className="text-xs font-medium text-emerald-300">FIPS 140-2 L3</span>
+              {/* Client identity selector + notifications + FIPS badge */}
+              <div className="flex items-center gap-2">
+                <IdentitySelector />
+                <NotificationsBell />
+                <div className="hidden lg:flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5">
+                  <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                  <span className="text-xs font-medium text-emerald-300">FIPS 140-2 L3</span>
+                </div>
               </div>
             </div>
           </header>
@@ -174,7 +184,13 @@ export default function Home() {
                 <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />
                 <span>Secure Multi-Branch Document Exchange System</span>
                 <span className="text-slate-700">•</span>
-                <span>v1.0</span>
+                <span>v1.1</span>
+                {identity && (
+                  <>
+                    <span className="text-slate-700">•</span>
+                    <span className="text-emerald-400">Client: {identity.code}</span>
+                  </>
+                )}
               </div>
               <div className="flex items-center gap-3 font-mono">
                 <span>NIST SP 800-57</span>
