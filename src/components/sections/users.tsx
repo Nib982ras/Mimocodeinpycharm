@@ -70,8 +70,8 @@ export function UsersSection() {
   const load = useCallback(async () => {
     try {
       const [uRes, bRes] = await Promise.all([
-        fetch("/api/users"),
-        fetch("/api/branches"),
+        fetch("/api/users", { credentials: "include" }),
+        fetch("/api/branches", { credentials: "include" }),
       ]);
       // A 401 on either endpoint signals an expired session → flip to login.
       if (uRes.status === 401 || bRes.status === 401) {
@@ -270,6 +270,7 @@ function AddUserDialog({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, displayName, password, role, branchId: role === "USER" ? branchId : null }),
+        credentials: "include",
       });
       const data = await res.json();
       if (!res.ok || !data.ok) {
@@ -373,7 +374,7 @@ function DeleteUserDialog({
     if (!target) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/users/${target.id}`, { method: "DELETE" });
+      const res = await fetch(`/api/users/${target.id}`, { method: "DELETE", credentials: "include" });
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error || "Failed to delete");
       toast({ title: "User deleted", description: `${target.username} has been removed.` });
@@ -431,6 +432,7 @@ function ResetPasswordDialog({
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password }),
+        credentials: "include",
       });
       const data = await res.json();
       if (!res.ok || !data.ok) throw new Error(data.error || "Failed to reset");

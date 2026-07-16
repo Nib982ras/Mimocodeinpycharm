@@ -91,20 +91,35 @@ export function verifySessionToken(token: string): SessionPayload | null {
 
 // ---------- Cookie helpers ----------
 
-export async function setSessionCookie(token: string): Promise<void> {
-  const store = await cookies();
-  store.set(SESSION_COOKIE, token, {
+/**
+ * Cookie attributes for the session.
+ *
+ * We always use `SameSite=none; Secure` because:
+ *  - The app runs inside a cross-site iframe in the preview panel, which
+ *    requires `SameSite=none` for cookies to be sent.
+ *  - `SameSite=none` requires `Secure` in modern browsers.
+ *  - Browsers treat `localhost` as a secure context, so `Secure` cookies are
+ *    accepted even on plain HTTP localhost — meaning dev/testing still works.
+ */
+function cookieOptions() {
+  return {
     httpOnly: true,
-    sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
+    sameSite: "none" as const,
+    secure: true,
     path: "/",
     maxAge: SESSION_MAX_AGE,
-  });
+  };
+}
+
+export async function setSessionCookie(token: string): Promise<void> {
+  const store = await cookies();
+  store.set(SESSION_COOKIE, token, cookieOptions());
 }
 
 export async function clearSessionCookie(): Promise<void> {
   const store = await cookies();
-  store.delete(SESSION_COOKIE);
+  // Deleting with the same options ensures the browser matches the cookie.
+  store.set(SESSION_COOKIE, "", { ...cookieOptions(), maxAge: 0 });
 }
 
 // ---------- Server-side session resolution ----------

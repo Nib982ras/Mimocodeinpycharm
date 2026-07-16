@@ -1,12 +1,15 @@
 // Thin fetch wrappers around the JSON API.
 //
+// All requests include `credentials: "include"` so the session cookie is sent
+// even when the app runs behind a reverse proxy / preview iframe.
+//
 // On a 401 (session expired / invalid), we dispatch a global
 // `auth:unauthorized` event so the AuthProvider can proactively re-check the
 // session and flip back to the login screen — instead of letting the error
 // bubble up and crash the React tree.
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  const res = await fetch(url, { credentials: "include", ...init });
   const ct = res.headers.get("content-type") || "";
   if (!res.ok) {
     // Signal an expired/invalid session so the app returns to login gracefully.
@@ -68,7 +71,7 @@ export const api = {
     return json<{ ok: boolean; document: import("@/lib/types").DocumentRecord }>("/api/documents", { method: "POST", body: fd });
   },
   decryptDocument: async (id: string) => {
-    const res = await fetch(`/api/documents/${id}/decrypt`, { method: "POST" });
+    const res = await fetch(`/api/documents/${id}/decrypt`, { method: "POST", credentials: "include" });
     if (!res.ok) {
       if (res.status === 401 && typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent("auth:unauthorized"));
