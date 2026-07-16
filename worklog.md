@@ -110,3 +110,24 @@ Stage Summary:
 - API access control verified via curl: unauth→401, regular user→403 on /api/users, admin→200; wrong password→401; dashboard scoped to branch for regular users.
 - VLM screenshot review confirmed: login screen, dept-a1 dashboard, admin user-management all render correctly with the right role/identity shown.
 - Default credentials: admin/admin123 (full management) and dept-a1..dept-c2 / same-as-username (branch users).
+
+---
+Task ID: 23
+Agent: main
+Task: Fix the "Authentication required" runtime crash — when a session expires or is invalidated, the app was throwing uncaught 401 errors from api.ts, crashing the React tree.
+
+Work Log:
+- Root cause: the `json()` helper in `src/lib/api.ts` threw an Error on any non-OK response. Several section loaders (documents, branches, keys, audit, users) had `try/finally` without a `catch`, so the throw became an unhandled promise rejection → React error overlay. The Documents section's 5s poll made this especially likely to trigger mid-session.
+- Fix layer 1 — `src/lib/api.ts`: on HTTP 401, dispatch a global `window` event `auth:unauthorized` before throwing. Introduced `ApiError` class carrying the status code. Added the same 401-event dispatch to the `decryptDocument` helper. Exported `isUnauthorized()` helper.
+- Fix layer 2 — `src/components/auth-provider.tsx`: added a `useEffect` that listens for `auth:unauthorized` and calls `setUser(null)` + `refresh()` (which re-checks `/api/auth/me`). If the session is truly gone, the app flips to the login screen; if it was transient, the user stays logged in.
+- Fix layer 3 — all section loaders: added `catch` blocks to `load()` in documents, branches, keys, audit, and users sections. Errors are swallowed (previous state is kept); the 401 event handles the redirect. The users section also got explicit 401 detection on its raw `fetch` calls.
+- ESLint passes clean.
+
+Stage Summary:
+- Agent Browser verification (as dept-a1 USER with active 5s poll):
+  * Logged in as dept-a1 → Documents page (poll active).
+  * Invalidated session via /api/auth/logout (clears httpOnly cookie).
+  * Waited 8s → the poll fired, hit 401, dispatched auth:unauthorized.
+  * App gracefully returned to the login screen (login:true, docs:false). NO browser errors, NO crash overlay.
+- VLM confirmed the screenshot shows the login screen, not an error.
+- The crash is fully fixed: expired/invalid sessions now gracefully redirect to login instead of throwing an uncaught error.

@@ -80,6 +80,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     refresh();
   }, [refresh]);
 
+  // If any API call returns 401 (session expired / invalidated), re-check the
+  // session. getSession will return null → user becomes null → login screen.
+  useEffect(() => {
+    const onUnauthorized = () => {
+      setUser(null);
+      setNotifications([]);
+      setOnlineClients([]);
+      setConnected(false);
+      // Re-check in case it was a transient issue; if the session is truly gone
+      // /api/auth/me returns { user: null } and we stay on the login screen.
+      refresh();
+    };
+    window.addEventListener("auth:unauthorized", onUnauthorized);
+    return () => window.removeEventListener("auth:unauthorized", onUnauthorized);
+  }, [refresh]);
+
   const pushNotification = useCallback((n: Omit<LiveNotification, "id" | "createdAt">) => {
     setNotifications((prev) =>
       [{ ...n, id: Math.random().toString(36).slice(2), createdAt: Date.now() }, ...prev].slice(0, 12)

@@ -46,6 +46,8 @@ export function BranchesSection() {
     try {
       const res = await api.branches();
       setBranches(res.branches);
+    } catch {
+      // 401 → auth:unauthorized event flips to login; other errors keep state.
     } finally {
       setLoading(false);
     }

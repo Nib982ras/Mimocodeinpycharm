@@ -76,10 +76,16 @@ export function DocumentsSection() {
   const [reloadTick, setReloadTick] = useState(0);
 
   const load = useCallback(async () => {
-    const [b, d] = await Promise.all([api.branches(), api.documents()]);
-    setBranches(b.branches);
-    setDocuments(d.documents);
-    setLoading(false);
+    try {
+      const [b, d] = await Promise.all([api.branches(), api.documents()]);
+      setBranches(b.branches);
+      setDocuments(d.documents);
+    } catch {
+      // A 401 triggers the auth:unauthorized event (handled by AuthProvider →
+      // login screen). Any other error just keeps the previous state.
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {

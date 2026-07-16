@@ -1,17 +1,41 @@
 // Thin fetch wrappers around the JSON API.
+//
+// On a 401 (session expired / invalid), we dispatch a global
+// `auth:unauthorized` event so the AuthProvider can proactively re-check the
+// session and flip back to the login screen — instead of letting the error
+// bubble up and crash the React tree.
 
 async function json<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   const ct = res.headers.get("content-type") || "";
   if (!res.ok) {
+    // Signal an expired/invalid session so the app returns to login gracefully.
+    if (res.status === 401 && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+    }
     if (ct.includes("application/json")) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || `Request failed (${res.status})`);
+      throw new ApiError(body.error || `Request failed (${res.status})`, res.status);
     }
-    throw new Error(`Request failed (${res.status})`);
+    throw new ApiError(`Request failed (${res.status})`, res.status);
   }
   if (ct.includes("application/json")) return res.json() as Promise<T>;
   return (await res.text()) as unknown as T;
+}
+
+/** Error carrying the HTTP status, so callers can distinguish 401/403/404 etc. */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
+/** True if an error is an authentication failure (401). */
+export function isUnauthorized(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 401;
 }
 
 export const api = {
@@ -46,8 +70,11 @@ export const api = {
   decryptDocument: async (id: string) => {
     const res = await fetch(`/api/documents/${id}/decrypt`, { method: "POST" });
     if (!res.ok) {
+      if (res.status === 401 && typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+      }
       const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || `Decrypt failed (${res.status})`);
+      throw new ApiError(body.error || `Decrypt failed (${res.status})`, res.status);
     }
     return {
       blob: await res.blob(),

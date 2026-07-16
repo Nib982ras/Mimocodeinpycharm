@@ -69,12 +69,21 @@ export function UsersSection() {
 
   const load = useCallback(async () => {
     try {
-      const [u, b] = await Promise.all([
-        fetch("/api/users").then((r) => r.json()),
-        fetch("/api/branches").then((r) => r.json()),
+      const [uRes, bRes] = await Promise.all([
+        fetch("/api/users"),
+        fetch("/api/branches"),
       ]);
+      // A 401 on either endpoint signals an expired session → flip to login.
+      if (uRes.status === 401 || bRes.status === 401) {
+        window.dispatchEvent(new CustomEvent("auth:unauthorized"));
+        return;
+      }
+      const u = await uRes.json().catch(() => ({}));
+      const b = await bRes.json().catch(() => ({}));
       if (u.ok) setUsers(u.users);
       if (b.ok) setBranches(b.branches.map((x: BranchLite & { type: string }) => ({ id: x.id, code: x.code, name: x.name, type: x.type })));
+    } catch {
+      // network error — keep previous state
     } finally {
       setLoading(false);
     }

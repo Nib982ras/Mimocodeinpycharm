@@ -55,6 +55,8 @@ export function AuditSection() {
       const res = await api.audit(filter ? { action: filter } : undefined);
       setLogs(res.logs);
       setCounts(res.counts);
+    } catch {
+      // 401 → auth:unauthorized event flips to login; other errors keep state.
     } finally {
       setLoading(false);
     }

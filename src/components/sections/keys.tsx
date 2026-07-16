@@ -58,6 +58,8 @@ export function KeysSection() {
     try {
       const res = await api.keys();
       setKeys(res.keys);
+    } catch {
+      // 401 → auth:unauthorized event flips to login; other errors keep state.
     } finally {
       setLoading(false);
     }
