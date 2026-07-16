@@ -1,34 +1,47 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { requireUser, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/dashboard — aggregate statistics for the dashboard. */
+/** GET /api/dashboard — aggregate statistics for the dashboard.
+ *  Admins see the whole network; regular users see stats scoped to their branch.
+ */
 export async function GET() {
-  const [
-    branchCount,
-    documentCount,
-    keyCount,
-    auditCount,
-    activeKeys,
-    rotatedKeys,
-    revokedKeys,
-    decryptedDocs,
-    branchesByType,
-    recentAudit,
-    recentDocs,
-  ] = await Promise.all([
-    db.branch.count(),
-    db.document.count(),
-    db.key.count(),
-    db.auditLog.count(),
-    db.key.count({ where: { status: "ACTIVE" } }),
-    db.key.count({ where: { status: "ROTATED" } }),
-    db.key.count({ where: { status: "REVOKED" } }),
-    db.document.count({ where: { status: "DECRYPTED" } }),
-    db.branch.groupBy({ by: ["type"], _count: true }),
-    db.auditLog.findMany({ take: 8, orderBy: { createdAt: "desc" } }),
+  try {
+    const session = await requireUser();
+    const isAdmin = session.role === "ADMIN";
+    const branchId = session.branchId;
+
+    // Scope queries for non-admins to their own branch.
+    const docWhere = isAdmin ? {} : { OR: [{ senderBranchId: branchId! }, { recipientBranchId: branchId! }] };
+    const auditWhere = isAdmin ? {} : { branchId };
+
+    const [
+      branchCount,
+      documentCount,
+      keyCount,
+      auditCount,
+      activeKeys,
+      rotatedKeys,
+      revokedKeys,
+      decryptedDocs,
+      branchesByType,
+      recentAudit,
+      recentDocs,
+    ] = await Promise.all([
+      db.branch.count(),
+      db.document.count({ where: docWhere }),
+      isAdmin ? db.key.count() : db.key.count({ where: { branchId: branchId! } }),
+      db.auditLog.count({ where: auditWhere }),
+      isAdmin ? db.key.count({ where: { status: "ACTIVE" } }) : db.key.count({ where: { status: "ACTIVE", branchId: branchId! } }),
+      isAdmin ? db.key.count({ where: { status: "ROTATED" } }) : db.key.count({ where: { status: "ROTATED", branchId: branchId! } }),
+      isAdmin ? db.key.count({ where: { status: "REVOKED" } }) : db.key.count({ where: { status: "REVOKED", branchId: branchId! } }),
+      db.document.count({ where: { ...docWhere, status: "DECRYPTED" } }),
+      db.branch.groupBy({ by: ["type"], _count: true }),
+      db.auditLog.findMany({ where: auditWhere, take: 8, orderBy: { createdAt: "desc" } }),
     db.document.findMany({
+      where: docWhere,
       take: 6,
       orderBy: { createdAt: "desc" },
       include: {
@@ -49,6 +62,12 @@ export async function GET() {
 
   return NextResponse.json({
     ok: true,
+    user: {
+      username: session.username,
+      displayName: session.displayName,
+      role: session.role,
+      branch: session.branch,
+    },
     stats: {
       branches: branchCount,
       documents: documentCount,
@@ -79,6 +98,10 @@ export async function GET() {
       createdAt: d.createdAt.toISOString(),
     })),
   });
+  } catch (err) {
+    const r = authErrorResponse(err);
+    return r ?? NextResponse.json({ ok: false, error: "Failed to load dashboard" }, { status: 500 });
+  }
 }
 
 interface BranchNode {

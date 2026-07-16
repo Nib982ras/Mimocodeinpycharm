@@ -2,21 +2,26 @@
 
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { io, type Socket } from "socket.io-client";
-import type { Branch } from "@/lib/types";
 
 /**
- * Client Mode — the user picks which branch they are operating as. This simulates
- * each branch being an independent client connected to the central exchange hub.
+ * Auth context — replaces the old ClientMode.
  *
- * The hub connection (socket.io) is established whenever a branch identity is
- * chosen. The hub tracks presence and broadcasts real-time events:
- *   - document:delivered  → a new encrypted package arrived for the recipient
- *   - document:sent       → dispatch confirmation for the sender
- *   - document:decrypted  → receipt confirmation for the sender
- *   - branch:created      → a new node joined the topology
- *   - branch:online/offline → presence changes
- *   - clients:list        → current online branch list
+ * The current user is loaded from `/api/auth/me` on mount. If null, the app
+ * shows the login screen. Once authenticated, the hub connection is established
+ * automatically using the user's branch identity (no manual identity picker).
+ *
+ * Admin users (role=ADMIN) have no branch and therefore don't join the hub as a
+ * branch client — they observe. Regular users (role=USER) join as their branch.
  */
+
+export interface SessionUser {
+  id: string;
+  username: string;
+  displayName: string;
+  role: "ADMIN" | "USER";
+  branchId: string | null;
+  branch: { id: string; code: string; name: string; type: string } | null;
+}
 
 export interface OnlineClient {
   socketId: string;
@@ -27,14 +32,6 @@ export interface OnlineClient {
   connectedAt: number;
 }
 
-export interface HubDocumentEvent {
-  id: string;
-  name: string;
-  sender: { code: string; name: string };
-  recipient: { code: string; name: string };
-  size: number;
-}
-
 export interface LiveNotification {
   id: string;
   kind: "delivered" | "sent" | "decrypted" | "branch" | "presence";
@@ -43,12 +40,12 @@ export interface LiveNotification {
   createdAt: number;
 }
 
-interface ClientModeValue {
-  // The branch this browser is acting as (null = admin/observer mode)
-  identity: Branch | null;
-  setIdentity: (b: Branch | null) => void;
-  branches: Branch[];
-  setBranches: (b: Branch[]) => void;
+interface AuthValue {
+  user: SessionUser | null;
+  loading: boolean;
+  login: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  logout: () => Promise<void>;
+  refresh: () => Promise<void>;
   // Hub state
   connected: boolean;
   onlineClients: OnlineClient[];
@@ -57,38 +54,31 @@ interface ClientModeValue {
   clearNotifications: () => void;
 }
 
-const ClientModeContext = createContext<ClientModeValue | null>(null);
+const AuthContext = createContext<AuthValue | null>(null);
 
-const STORAGE_KEY = "secure-exchange.identity";
-
-export function ClientModeProvider({ children }: { children: ReactNode }) {
-  const [branches, setBranches] = useState<Branch[]>([]);
-  const socketRef = useRef<Socket | null>(null);
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [loading, setLoading] = useState(true);
   const [connected, setConnected] = useState(false);
   const [onlineClients, setOnlineClients] = useState<OnlineClient[]>([]);
   const [notifications, setNotifications] = useState<LiveNotification[]>([]);
+  const socketRef = useRef<Socket | null>(null);
 
-  // Load saved identity from localStorage via lazy initializer (no effect needed).
-  const [identity, setIdentityState] = useState<Branch | null>(() => {
-    if (typeof window === "undefined") return null;
+  const refresh = useCallback(async () => {
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) return JSON.parse(raw) as Branch;
+      const res = await fetch("/api/auth/me");
+      const data = await res.json();
+      setUser(data.user ?? null);
     } catch {
-      /* ignore */
+      setUser(null);
+    } finally {
+      setLoading(false);
     }
-    return null;
-  });
-
-  // Load branches list (for the identity picker)
-  useEffect(() => {
-    fetch("/api/branches")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.ok) setBranches(d.branches);
-      })
-      .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const pushNotification = useCallback((n: Omit<LiveNotification, "id" | "createdAt">) => {
     setNotifications((prev) =>
@@ -96,14 +86,37 @@ export function ClientModeProvider({ children }: { children: ReactNode }) {
     );
   }, []);
 
-  const setIdentity = useCallback((b: Branch | null) => {
-    setIdentityState(b);
+  const login = useCallback(
+    async (username: string, password: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await fetch("/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          return { ok: false, error: data.error || "Login failed" };
+        }
+        setUser(data.user);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: "Network error" };
+      }
+    },
+    []
+  );
+
+  const logout = useCallback(async () => {
     try {
-      if (b) localStorage.setItem(STORAGE_KEY, JSON.stringify({ id: b.id, code: b.code, name: b.name, type: b.type, region: b.region, parentId: b.parentId ?? null }));
-      else localStorage.removeItem(STORAGE_KEY);
+      await fetch("/api/auth/logout", { method: "POST" });
     } catch {
       /* ignore */
     }
+    setUser(null);
+    setNotifications([]);
+    setOnlineClients([]);
+    setConnected(false);
   }, []);
 
   const dismissNotification = useCallback((id: string) => {
@@ -111,16 +124,13 @@ export function ClientModeProvider({ children }: { children: ReactNode }) {
   }, []);
   const clearNotifications = useCallback(() => setNotifications([]), []);
 
-  // Establish the hub connection whenever identity changes. When identity is
-  // null we simply don't create a socket (cleanup of the previous one happens
-  // in the effect's return function).
+  // Establish the hub connection whenever the user changes.
+  // Only USER accounts (with a branch) join as a branch client.
   useEffect(() => {
-    if (!identity) {
-      // No-op: nothing to connect to. Any prior socket is cleaned up by the
-      // previous effect run's return function.
+    if (!user || user.role !== "USER" || !user.branch) {
       return;
     }
-
+    const identity = user.branch;
     const sock = io("/?XTransformPort=3003", {
       transports: ["websocket", "polling"],
       forceNew: true,
@@ -176,11 +186,9 @@ export function ClientModeProvider({ children }: { children: ReactNode }) {
         title: `New node joined: ${data.branch.code}`,
         description: `${data.branch.name} (${data.branch.type}) provisioned with ECC P-521 keys.`,
       });
-      // Refresh branches list
-      fetch("/api/branches").then((r) => r.json()).then((d) => { if (d.ok) setBranches(d.branches); }).catch(() => {});
     });
 
-    sock.on("document:delivered", (doc: HubDocumentEvent) => {
+    sock.on("document:delivered", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
       if (doc.recipient.code === identity.code) {
         pushNotification({
           kind: "delivered",
@@ -189,7 +197,7 @@ export function ClientModeProvider({ children }: { children: ReactNode }) {
         });
       }
     });
-    sock.on("document:sent", (doc: HubDocumentEvent) => {
+    sock.on("document:sent", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
       if (doc.sender.code === identity.code) {
         pushNotification({
           kind: "sent",
@@ -198,7 +206,7 @@ export function ClientModeProvider({ children }: { children: ReactNode }) {
         });
       }
     });
-    sock.on("document:decrypted", (doc: HubDocumentEvent) => {
+    sock.on("document:decrypted", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
       if (doc.sender.code === identity.code) {
         pushNotification({
           kind: "decrypted",
@@ -214,15 +222,16 @@ export function ClientModeProvider({ children }: { children: ReactNode }) {
       setConnected(false);
       setOnlineClients([]);
     };
-  }, [identity?.id]);
+  }, [user?.id, pushNotification]);
 
   return (
-    <ClientModeContext.Provider
+    <AuthContext.Provider
       value={{
-        identity,
-        setIdentity,
-        branches,
-        setBranches,
+        user,
+        loading,
+        login,
+        logout,
+        refresh,
         connected,
         onlineClients,
         notifications,
@@ -231,12 +240,12 @@ export function ClientModeProvider({ children }: { children: ReactNode }) {
       }}
     >
       {children}
-    </ClientModeContext.Provider>
+    </AuthContext.Provider>
   );
 }
 
-export function useClientMode(): ClientModeValue {
-  const ctx = useContext(ClientModeContext);
-  if (!ctx) throw new Error("useClientMode must be used within ClientModeProvider");
+export function useAuth(): AuthValue {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
   return ctx;
 }

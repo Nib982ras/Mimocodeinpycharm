@@ -4,6 +4,7 @@ import { decryptDocument, decryptPrivateKey } from "@/lib/crypto";
 import { readCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
+import { requireUser, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -18,12 +19,20 @@ export const dynamic = "force-dynamic";
  *  5. Verify the ECDSA-SHA512 signature over the ciphertext
  *  6. Verify the SHA-512 document integrity hash
  *
- * Returns the decrypted file bytes plus the verification results.
+ * Access control: only the recipient branch's users (or an admin) may decrypt.
  */
 export async function POST(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  let session;
+  try {
+    session = await requireUser();
+  } catch (err) {
+    const r = authErrorResponse(err);
+    return r ?? NextResponse.json({ ok: false, error: "Auth failed" }, { status: 500 });
+  }
+
   const { id } = await params;
 
   const doc = await db.document.findUnique({
@@ -38,6 +47,23 @@ export async function POST(
 
   if (!doc) {
     return NextResponse.json({ ok: false, error: "Document not found" }, { status: 404 });
+  }
+
+  // Authorization: the recipient branch's users, or an admin, may decrypt.
+  if (session.role !== "ADMIN" && doc.recipientBranchId !== session.branchId) {
+    await recordAudit({
+      action: "DOWNLOAD",
+      actor: session.username,
+      branchId: session.branchId ?? undefined,
+      documentId: doc.id,
+      status: "FAILURE",
+      details: { event: "UNAUTHORIZED_DECRYPT", fileName: doc.name, recipient: doc.recipientBranch.code },
+      ipAddress: req.headers.get("x-forwarded-for") || undefined,
+    });
+    return NextResponse.json(
+      { ok: false, error: "You are not authorized to decrypt this document" },
+      { status: 403 }
+    );
   }
 
   try {
@@ -72,13 +98,14 @@ export async function POST(
 
     await recordAudit({
       action: "DOWNLOAD",
-      actor: doc.recipientBranch.code,
+      actor: session.username,
       branchId: doc.recipientBranch.id,
       documentId: doc.id,
       status: result.signatureValid && result.documentHashValid ? "SUCCESS" : "WARNING",
       details: {
         fileName: doc.name,
         sender: doc.senderBranch.code,
+        recipient: doc.recipientBranch.code,
         signatureValid: result.signatureValid,
         documentHashValid: result.documentHashValid,
         decryptedBytes: result.plaintext.length,

@@ -72,3 +72,41 @@ Stage Summary:
   * Added a new department DEPT-D1 via the Branches dialog → 15 branches total, DEPT-D1 appears in the topology tree with freshly provisioned ECC key pairs.
 - VLM screenshot review confirmed: client identity visible in header, "Live" connection indicator, Connected Clients panel (1 online), no errors.
 - ESLint passes clean. The server keeps running while clients join/leave and new branches are added — exactly the "independent clients, everyone connected, add departments through it" behavior requested.
+
+---
+Task ID: 15-22
+Agent: main
+Task: Make the server operational with real authentication — each department/section PC/tablet logs in with username+password to send/receive encrypted files; admins can view/add/delete users.
+
+Work Log:
+- Added `User` model (username, displayName, passwordHash, role ADMIN|USER, branchId). Updated seed to provision 1 admin (`admin`/`admin123`) + one user per department (`dept-a1`/`dept-a1`, etc.).
+- Created `src/lib/auth.ts`: scrypt password hashing, HMAC-signed session tokens (JWT-like), httpOnly cookie, `getSession()`/`requireUser()`/`requireAdmin()` server helpers, `AuthError` + `authErrorResponse`.
+- Auth API routes: `/api/auth/login` (verify + set cookie + audit), `/api/auth/logout` (clear cookie), `/api/auth/me` (current session).
+- User management API (admin-gated): `GET/POST /api/users`, `DELETE /api/users/[id]`, `POST /api/users/[id]/password` (reset). All return 401 unauth / 403 non-admin.
+- Protected ALL existing APIs:
+  * `POST /api/documents` → requireUser; sender forced to session.branchId for USER (admin picks any). Audit actor = username.
+  * `POST /api/documents/[id]/decrypt` → requireUser; only recipient branch (or admin) may decrypt; 403 otherwise with FAILURE audit.
+  * `GET /api/documents` + `/api/documents/[id]` → users see only their branch's docs; admin sees all.
+  * `POST /api/branches` → requireAdmin. `GET /api/branches` → any authed user.
+  * `GET /api/keys` + `POST /api/keys/[id]/rotate` → requireAdmin.
+  * `GET /api/dashboard` + `/api/audit` → scoped to the user's branch for USER; full for ADMIN.
+- Created `src/components/auth-provider.tsx` (replaces client-mode): loads session via `/api/auth/me`, exposes `login`/`logout`/`refresh`, auto-joins the exchange hub as the user's branch (USER only; admin observes).
+- Created `src/components/login-screen.tsx`: full-page branded login with username/password, show-password toggle, demo-account hints, error states.
+- Refactored `src/components/client-ui.tsx`: replaced IdentitySelector with `UserMenu` (shows displayName + role + branch code + Sign out button); NotificationsBell now keyed off the auth user.
+- Created `src/components/sections/users.tsx` (admin): searchable user table with avatars, role badges, branch chips; Add User dialog (username, display name, password, role, branch); Delete User confirmation (cannot delete self); Reset Password dialog.
+- Refactored `src/app/page.tsx`: AuthProvider wrapper → loading splash → login screen (if no session) → app shell. Role-based nav (Branches/Keys/Users admin-only, auto-hidden for regular users). Header shows Admin badge + UserMenu + NotificationsBell. Footer shows `@username · branch`.
+
+Stage Summary:
+- ESLint clean. Exchange hub on :3003, Next.js on :3000 — both running.
+- Agent Browser end-to-end verification (all green):
+  * Login screen renders (SecureExchange branding, demo-account hints).
+  * dept-a1 logs in → dashboard, `@dept-a1` in header, admin-only nav (Users/Branches/Keys) HIDDEN.
+  * Sender locked to dept-a1's account; sent report.txt → DEPT-B1; toast + document listed.
+  * Logout → back to login screen.
+  * admin logs in → Admin badge visible, all admin nav (Users, Branches, Keys) appears.
+  * Users section lists all 7 accounts (admin + 6 dept users).
+  * Created new user `dept-d2` (USER, branch DEPT-C2) → appears in table.
+  * Deleted `dept-d2` → removed from table. Cannot delete own account (button disabled).
+- API access control verified via curl: unauth→401, regular user→403 on /api/users, admin→200; wrong password→401; dashboard scoped to branch for regular users.
+- VLM screenshot review confirmed: login screen, dept-a1 dashboard, admin user-management all render correctly with the right role/identity shown.
+- Default credentials: admin/admin123 (full management) and dept-a1..dept-c2 / same-as-username (branch users).

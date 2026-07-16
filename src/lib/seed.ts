@@ -5,6 +5,7 @@ import {
   type KeyPairPem,
 } from "@/lib/crypto";
 import { recordAudit } from "@/lib/audit";
+import { hashPassword } from "@/lib/auth";
 
 /**
  * Seed the system with a hierarchical organization matching the recommended
@@ -116,6 +117,49 @@ export async function seedDatabase(): Promise<{ branches: number; keys: number; 
     },
   });
 
+  // Provision user accounts:
+  //   - one administrator (no branch)
+  //   - one user per department (username = lowercased branch code, password = same)
+  const departments = await db.branch.findMany({ where: { type: "DEPARTMENT" } });
+  const usersCreated: { username: string; role: string; branch: string }[] = [];
+
+  // Admin account
+  await db.user.create({
+    data: {
+      username: "admin",
+      displayName: "System Administrator",
+      passwordHash: hashPassword("admin123"),
+      role: "ADMIN",
+      branchId: null,
+    },
+  });
+  usersCreated.push({ username: "admin", role: "ADMIN", branch: "—" });
+
+  // One user per department — username/password = lowercased code (e.g. dept-a1 / dept-a1)
+  for (const dept of departments) {
+    const username = dept.code.toLowerCase();
+    await db.user.create({
+      data: {
+        username,
+        displayName: dept.name,
+        passwordHash: hashPassword(username),
+        role: "USER",
+        branchId: dept.id,
+      },
+    });
+    usersCreated.push({ username, role: "USER", branch: dept.code });
+  }
+
+  await recordAudit({
+    action: "SEED",
+    actor: "SYSTEM",
+    status: "SUCCESS",
+    details: {
+      usersCreated: usersCreated.length,
+      message: "Seeded admin + one user per department",
+    },
+  });
+
   return {
     branches: BRANCH_SEEDS.length,
     keys: BRANCH_SEEDS.length * 2,
@@ -128,5 +172,6 @@ export async function resetDatabase(): Promise<void> {
   await db.auditLog.deleteMany();
   await db.document.deleteMany();
   await db.key.deleteMany();
+  await db.user.deleteMany();
   await db.branch.deleteMany();
 }

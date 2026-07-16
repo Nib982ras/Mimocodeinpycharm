@@ -35,7 +35,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { useClientMode } from "@/components/client-mode";
+import { useAuth } from "@/components/auth-provider";
 import { cn } from "@/lib/utils";
 
 const WORKFLOW_STEPS = [
@@ -51,7 +51,12 @@ const WORKFLOW_STEPS = [
 type DocTab = "all" | "inbox" | "outbox";
 
 export function DocumentsSection() {
-  const { identity } = useClientMode();
+  const { user } = useAuth();
+  // For branch users, the sender is their own branch (locked). Admins can pick any sender.
+  const identity = user?.role === "USER" && user.branch
+    ? { id: user.branch.id, code: user.branch.code, name: user.branch.name }
+    : null;
+  const isAdmin = user?.role === "ADMIN";
   const [branches, setBranches] = useState<Branch[]>([]);
   const [documents, setDocuments] = useState<DocumentRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -90,7 +95,7 @@ export function DocumentsSection() {
       setTab("all");
       setSenderId("");
     }
-  }, [identity]);
+  }, [identity?.id]);
 
   // Poll for new documents every 5s when in client mode (best-effort live refresh
   // in addition to the socket-driven reload below).
@@ -98,7 +103,7 @@ export function DocumentsSection() {
     if (!identity) return;
     const t = setInterval(() => setReloadTick((n) => n + 1), 5000);
     return () => clearInterval(t);
-  }, [identity]);
+  }, [identity?.id]);
   useEffect(() => {
     if (reloadTick > 0) load();
   }, [reloadTick, load]);
@@ -182,7 +187,7 @@ export function DocumentsSection() {
           <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
             <div className="md:col-span-4 space-y-1.5">
               <label className="text-xs font-medium text-slate-400">
-                Sender branch {identity && <span className="text-emerald-400">· locked to your identity</span>}
+                Sender branch {identity ? <span className="text-emerald-400">· locked to your account</span> : isAdmin && <span className="text-amber-400">· admin: choose any</span>}
               </label>
               {identity ? (
                 <div className="flex items-center gap-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2">

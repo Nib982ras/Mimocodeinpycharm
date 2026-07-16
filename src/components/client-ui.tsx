@@ -1,29 +1,22 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
-import { useClientMode, type LiveNotification } from "@/components/client-mode";
+import { useState } from "react";
+import { useAuth, type LiveNotification } from "@/components/auth-provider";
 import {
   Users,
   Wifi,
   WifiOff,
   Bell,
   X,
-  CheckCircle2,
   Send,
   Inbox,
   Unlock,
   Network,
+  LogOut,
+  ShieldCheck,
   UserCircle2,
-  ChevronDown,
 } from "lucide-react";
 import { Panel, Badge } from "@/components/sections/shared";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
 import {
   Popover,
   PopoverContent,
@@ -33,57 +26,51 @@ import { Button } from "@/components/ui/button";
 import { BRANCH_TYPE_META, formatRelativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-/** Identity selector shown in the header — pick which branch this client is. */
-export function IdentitySelector() {
-  const { identity, setIdentity, branches, connected } = useClientMode();
+/** Header widget showing the signed-in user + logout. */
+export function UserMenu() {
+  const { user, logout } = useAuth();
+  const [busy, setBusy] = useState(false);
+  if (!user) return null;
+
+  const handleLogout = async () => {
+    setBusy(true);
+    await logout();
+    setBusy(false);
+  };
 
   return (
     <div className="flex items-center gap-2">
-      <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/60 px-2 py-1.5">
-        <UserCircle2 className={cn("h-4 w-4", identity ? "text-emerald-400" : "text-slate-500")} />
-        <Select
-          value={identity?.id ?? "__none__"}
-          onValueChange={(v) => {
-            if (v === "__none__") {
-              setIdentity(null);
-              return;
-            }
-            const b = branches.find((x) => x.id === v);
-            setIdentity(b ?? null);
-          }}
-        >
-          <SelectTrigger className="h-7 w-[150px] sm:w-[180px] border-0 bg-transparent p-0 text-xs text-slate-200 shadow-none focus:ring-0">
-            <SelectValue placeholder="Observer (no client)" />
-          </SelectTrigger>
-          <SelectContent className="bg-slate-900 border-slate-700 max-h-80">
-            <SelectItem value="__none__" className="text-slate-400 italic focus:bg-slate-800">
-              Observer (no client)
-            </SelectItem>
-            {branches.map((b) => (
-              <SelectItem key={b.id} value={b.id} className="text-slate-100 focus:bg-slate-800">
-                <span className="font-mono text-[11px] text-emerald-400 mr-2">{b.code}</span>
-                <span className="truncate">{b.name}</span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/60 px-2.5 py-1.5">
+        <UserCircle2 className={cn("h-4 w-4", user.role === "ADMIN" ? "text-amber-400" : "text-emerald-400")} />
+        <div className="min-w-0 leading-tight">
+          <div className="text-xs font-medium text-slate-100 truncate max-w-[120px]">{user.displayName}</div>
+          <div className="text-[10px] text-slate-500 font-mono">
+            {user.role === "ADMIN" ? "admin" : user.branch?.code}
+          </div>
+        </div>
       </div>
-      {identity ? (
-        <Badge className={connected ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" : "border-amber-500/40 bg-amber-500/10 text-amber-300"}>
-          {connected ? <Wifi className="h-3 w-3" /> : <WifiOff className="h-3 w-3" />}
-          {connected ? "Live" : "Linking…"}
-        </Badge>
-      ) : null}
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={handleLogout}
+        disabled={busy}
+        className="text-slate-400 hover:text-rose-300 hover:bg-rose-500/10 h-8 px-2"
+        title="Sign out"
+      >
+        <LogOut className="h-4 w-4" />
+        <span className="hidden sm:inline ml-1 text-xs">Sign out</span>
+      </Button>
     </div>
   );
 }
 
 /** Notifications bell with a popover of recent live events. */
 export function NotificationsBell() {
-  const { notifications, clearNotifications, dismissNotification, identity } = useClientMode();
+  const { notifications, clearNotifications, dismissNotification, user } = useAuth();
   const [open, setOpen] = useState(false);
 
-  if (!identity) return null;
+  // Only show the bell to branch users (admins observe but don't get per-branch delivery events).
+  if (!user || user.role !== "USER") return null;
   const count = notifications.length;
 
   return (
@@ -145,9 +132,9 @@ function NotificationRow({ n, onDismiss }: { n: LiveNotification; onDismiss: () 
 
 /** Side panel listing online branch clients (presence). */
 export function ConnectedClientsPanel() {
-  const { onlineClients, connected, identity, branches } = useClientMode();
+  const { onlineClients, connected, user } = useAuth();
 
-  if (!identity) {
+  if (!user || user.role !== "USER" || !user.branch) {
     return (
       <Panel className="p-4">
         <div className="flex items-center gap-2 mb-2">
@@ -155,11 +142,15 @@ export function ConnectedClientsPanel() {
           <span className="text-sm font-semibold text-slate-200">Connected Clients</span>
         </div>
         <p className="text-xs text-slate-500">
-          Select a branch identity in the header to connect as a client and see who else is online.
+          {user?.role === "ADMIN"
+            ? "Admins observe the network. Sign in as a department user to join as a connected client."
+            : "Sign in to connect as a branch client and see who else is online."}
         </p>
       </Panel>
     );
   }
+
+  const identity = user.branch;
 
   return (
     <Panel>
@@ -201,9 +192,10 @@ export function ConnectedClientsPanel() {
           </div>
         )}
       </div>
-      {onlineClients.length < branches.length && (
-        <div className="border-t border-slate-800 px-3 py-2 text-[11px] text-slate-500">
-          {branches.length - onlineClients.length} branch(es) offline · {branches.length} total in network
+      {connected && (
+        <div className="border-t border-slate-800 px-3 py-2 text-[11px] text-slate-500 flex items-center gap-1.5">
+          <ShieldCheck className="h-3 w-3 text-emerald-400" />
+          You are connected as {identity.code}
         </div>
       )}
     </Panel>

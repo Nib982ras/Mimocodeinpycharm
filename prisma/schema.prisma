@@ -23,11 +23,29 @@ model Branch {
   sentDocs    Document[] @relation("SenderDocs")
   receivedDocs Document[] @relation("RecipientDocs")
   auditLogs   AuditLog[]
+  users       User[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   @@index([parentId])
   @@index([type])
+}
+
+// User accounts for authentication. Each USER is tied to a branch (the
+// department/section they operate as). ADMIN accounts manage the system.
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  displayName  String
+  passwordHash String   // scrypt(salt:hash) hex
+  role         String   @default("USER") // ADMIN | USER
+  branchId     String?
+  branch       Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([branchId])
+  @@index([role])
 }
 
 // Cryptographic key pairs (ECC P-521). Separate keys for ECDH (encryption) and ECDSA (signing).

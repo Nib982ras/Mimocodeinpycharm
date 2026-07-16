@@ -10,6 +10,7 @@ import {
   ShieldCheck,
   Menu,
   Lock,
+  Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -19,28 +20,33 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { ClientModeProvider, useClientMode } from "@/components/client-mode";
-import { IdentitySelector, NotificationsBell, ConnectedClientsPanel } from "@/components/client-ui";
+import { AuthProvider, useAuth } from "@/components/auth-provider";
+import { UserMenu, NotificationsBell, ConnectedClientsPanel } from "@/components/client-ui";
+import { LoginScreen } from "@/components/login-screen";
 import { DashboardSection } from "@/components/sections/dashboard";
 import { DocumentsSection } from "@/components/sections/documents";
 import { BranchesSection } from "@/components/sections/branches";
 import { KeysSection } from "@/components/sections/keys";
 import { AuditSection } from "@/components/sections/audit";
+import { UsersSection } from "@/components/sections/users";
+import { Loader2 } from "lucide-react";
 
-type SectionId = "dashboard" | "documents" | "branches" | "keys" | "audit";
+type SectionId = "dashboard" | "documents" | "branches" | "keys" | "audit" | "users";
 
 interface NavItem {
   id: SectionId;
   label: string;
   description: string;
   icon: typeof LayoutDashboard;
+  adminOnly?: boolean;
 }
 
 const NAV: NavItem[] = [
   { id: "dashboard", label: "Dashboard", description: "System overview", icon: LayoutDashboard },
   { id: "documents", label: "Documents", description: "Encrypt & exchange", icon: FileLock2 },
-  { id: "branches", label: "Branches", description: "Network hierarchy", icon: Network },
-  { id: "keys", label: "Key Vault", description: "ECC key management", icon: KeyRound },
+  { id: "branches", label: "Branches", description: "Network hierarchy", icon: Network, adminOnly: true },
+  { id: "keys", label: "Key Vault", description: "ECC key management", icon: KeyRound, adminOnly: true },
+  { id: "users", label: "Users", description: "Account management", icon: Users, adminOnly: true },
   { id: "audit", label: "Audit Log", description: "Immutable trail", icon: ScrollText },
 ];
 
@@ -49,26 +55,49 @@ const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
   documents: { title: "Secure Document Exchange", subtitle: "Hybrid encryption workflow — AES-256-GCM + ECDH-P521 + ECDSA-SHA512" },
   branches: { title: "Branch Network Topology", subtitle: "Hierarchical organization with mesh sub-networks" },
   keys: { title: "Cryptographic Key Vault", subtitle: "ECC P-521 key lifecycle management" },
+  users: { title: "User Account Management", subtitle: "Provision and manage department & administrator logins" },
   audit: { title: "Immutable Audit Trail", subtitle: "Tamper-evident log of all cryptographic operations" },
 };
 
 export default function Home() {
   return (
-    <ClientModeProvider>
+    <AuthProvider>
       <Shell />
-    </ClientModeProvider>
+    </AuthProvider>
   );
 }
 
 function Shell() {
+  const { user, loading } = useAuth();
   const [section, setSection] = useState<SectionId>("dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { identity } = useClientMode();
 
   const navigate = useCallback((id: SectionId) => {
     setSection(id);
     setMobileOpen(false);
   }, []);
+
+  // While the session is being checked, show a splash.
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3 text-slate-400">
+          <Loader2 className="h-6 w-6 animate-spin text-emerald-400" />
+          <span className="text-sm">Loading secure session…</span>
+        </div>
+      </div>
+    );
+  }
+
+  // No session → login screen.
+  if (!user) {
+    return <LoginScreen />;
+  }
+
+  const isAdmin = user.role === "ADMIN";
+  // Guard: if a non-admin somehow has a non-admin-only section selected, reset.
+  const activeSection = NAV.find((n) => n.id === section && (!n.adminOnly || isAdmin)) ? section : "dashboard";
+  const visibleNav = NAV.filter((n) => !n.adminOnly || isAdmin);
 
   const sidebar = (
     <div className="flex h-full flex-col">
@@ -83,8 +112,8 @@ function Shell() {
       </div>
 
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-        {NAV.map((item) => {
-          const active = section === item.id;
+        {visibleNav.map((item) => {
+          const active = activeSection === item.id;
           const Icon = item.icon;
           return (
             <button
@@ -124,7 +153,7 @@ function Shell() {
     </div>
   );
 
-  const meta = SECTION_TITLES[section];
+  const meta = SECTION_TITLES[activeSection];
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
@@ -158,39 +187,39 @@ function Shell() {
                 <p className="text-xs md:text-sm text-slate-400 leading-tight truncate">{meta.subtitle}</p>
               </div>
 
-              {/* Client identity selector + notifications + FIPS badge */}
+              {/* User menu + notifications + role badge */}
               <div className="flex items-center gap-2">
-                <IdentitySelector />
                 <NotificationsBell />
-                <div className="hidden lg:flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5">
-                  <ShieldCheck className="h-4 w-4 text-emerald-400" />
-                  <span className="text-xs font-medium text-emerald-300">FIPS 140-2 L3</span>
-                </div>
+                {isAdmin && (
+                  <div className="hidden sm:flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1.5">
+                    <ShieldCheck className="h-4 w-4 text-amber-400" />
+                    <span className="text-xs font-medium text-amber-300">Admin</span>
+                  </div>
+                )}
+                <UserMenu />
               </div>
             </div>
           </header>
 
           <main className="flex-1 p-4 md:p-6">
-            {section === "dashboard" && <DashboardSection onNavigate={navigate} />}
-            {section === "documents" && <DocumentsSection />}
-            {section === "branches" && <BranchesSection />}
-            {section === "keys" && <KeysSection />}
-            {section === "audit" && <AuditSection />}
+            {activeSection === "dashboard" && <DashboardSection onNavigate={(id) => navigate(id as SectionId)} />}
+            {activeSection === "documents" && <DocumentsSection />}
+            {activeSection === "branches" && <BranchesSection />}
+            {activeSection === "keys" && <KeysSection />}
+            {activeSection === "users" && <UsersSection />}
+            {activeSection === "audit" && <AuditSection />}
           </main>
 
           <footer className="mt-auto border-t border-slate-800 bg-slate-900/40 px-4 md:px-6 py-3">
             <div className="flex flex-col sm:flex-row items-center justify-between gap-2 text-[11px] text-slate-500">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />
                 <span>Secure Multi-Branch Document Exchange System</span>
                 <span className="text-slate-700">•</span>
-                <span>v1.1</span>
-                {identity && (
-                  <>
-                    <span className="text-slate-700">•</span>
-                    <span className="text-emerald-400">Client: {identity.code}</span>
-                  </>
-                )}
+                <span>v2.0</span>
+                <span className="text-slate-700">•</span>
+                <span className="text-emerald-400">@{user.username}</span>
+                {user.branch && <span className="text-slate-600">· {user.branch.code}</span>}
               </div>
               <div className="flex items-center gap-3 font-mono">
                 <span>NIST SP 800-57</span>
