@@ -1,4 +1,15 @@
-// Secure Multi-Branch Document Exchange System - Database Schema
+// Secure Multi-Branch Document Exchange System — Database Schema
+//
+// Role hierarchy (least privilege):
+//   OWNER            — sole supreme authority: system activation, emergency
+//                      lockdown, license revocation, key destruction.
+//   SECURITY_ADMIN   — manages users, branches, keys, audit (no system kill).
+//   BRANCH_ADMIN     — manages their own branch's users + documents.
+//   USER             — sends/receives encrypted documents as their branch.
+//   READONLY         — can view documents only; cannot send or decrypt.
+//
+// The owner's authority is implemented through an authenticated administrative
+// identity + signed revocation commands — NOT a master password or backdoor.
 
 generator client {
   provider = "prisma-client-js"
@@ -7,6 +18,17 @@ generator client {
 datasource db {
   provider = "sqlite"
   url      = env("DATABASE_URL")
+}
+
+// Singleton row holding global system state: active/deactivated, lockdown.
+model SystemState {
+  id            String   @id @default("singleton")
+  active        Boolean  @default(true)   // system-wide activation
+  lockdown      Boolean  @default(false)  // emergency lockdown
+  lockdownReason String?
+  lockedBy      String?  // owner username who initiated lockdown
+  lockedAt      DateTime?
+  updatedAt     DateTime @updatedAt
 }
 
 // Hierarchical organization: Headquarters -> Regional -> Department -> Sub-branch
@@ -31,21 +53,108 @@ model Branch {
   @@index([type])
 }
 
-// User accounts for authentication. Each USER is tied to a branch (the
-// department/section they operate as). ADMIN accounts manage the system.
+// User accounts. Roles enforced server-side on every API.
 model User {
-  id           String   @id @default(cuid())
-  username     String   @unique
-  displayName  String
-  passwordHash String   // scrypt(salt:hash) hex
-  role         String   @default("USER") // ADMIN | USER
-  branchId     String?
-  branch       Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id              String    @id @default(cuid())
+  username        String    @unique
+  displayName     String
+  passwordHash    String    // scrypt(salt:hash) hex — never plaintext
+  role            String    @default("USER") // OWNER | SECURITY_ADMIN | BRANCH_ADMIN | USER | READONLY
+  branchId        String?
+  branch          Branch?   @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  status          String    @default("ACTIVE") // ACTIVE | SUSPENDED | REVOKED
+  suspendedReason String?
+  suspendedAt     DateTime?
+  suspendedBy     String?
+  twoFactor       TwoFactor?
+  sessions        Session[]
+  devices         Device[]
+  auditLogs       AuditLog[] @relation("ActorAuditLogs")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   @@index([branchId])
   @@index([role])
+  @@index([status])
+}
+
+// TOTP two-factor credentials. Secret encrypted at rest with the master key.
+model TwoFactor {
+  id              String   @id @default(cuid())
+  userId          String   @unique
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  encryptedSecret String   // AES-256-GCM encrypted TOTP secret, base64
+  secretIv        String   // base64 IV
+  backupCodesHash String   // bcrypt-style scrypt hashes, JSON array
+  enabled         Boolean  @default(false)
+  enforced        Boolean  @default(false) // admin-enforced for privileged users
+  enrolledAt      DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// Short-lived session tokens (in addition to the cookie JWT) for revocation.
+// When a user is suspended or the system locks down, all their sessions are
+// marked revoked so their cookie token is rejected.
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenJti  String   @unique // unique session id embedded in the JWT
+  ipAddress String?
+  userAgent String?
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+  revokedAt DateTime?
+
+  @@index([userId])
+  @@index([revoked])
+}
+
+// Authorized device/installation. Each device has its own ECC key pair; the
+// public key is registered server-side and used to sign license-validation
+// challenges. Revoking a device blocks all its future authentication.
+model Device {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name            String   // human label, e.g. "Office PC — Room 204"
+  fingerprint     String   @unique // SHA-256 of device public key DER
+  publicKeyPem    String
+  status          String   @default("ACTIVE") // ACTIVE | REVOKED
+  lastSeenAt      DateTime?
+  lastSeenIp      String?
+  createdAt       DateTime @default(now())
+  revokedAt       DateTime?
+  revokedBy       String?
+  license         License?
+
+  @@index([userId])
+  @@index([status])
+}
+
+// Cryptographically signed license bound to a device. The license payload
+// (deviceId, expiry, scope, tier) is signed with the system's ECDSA licensing
+// key; validation verifies the signature rather than trusting spoofable IDs.
+model License {
+  id            String    @id @default(cuid())
+  deviceId      String    @unique
+  device        Device    @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  licenseKey    String    @unique // human-readable license key
+  status        String    @default("ACTIVE") // ACTIVE | EXPIRED | REVOKED | SUSPENDED
+  tier          String    @default("STANDARD") // STANDARD | ENTERPRISE | TRIAL
+  issuedAt      DateTime  @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedBy     String?
+  revokeReason  String?
+  // Cryptographic signature over {deviceId, expiresAt, tier, issuedAt} with the
+  // system's licensing private key (ECDSA-P521-SHA512).
+  signature     String    // base64 DER
+  signerFingerprint String // SHA-256 of licensing public key
+
+  @@index([status])
+  @@index([expiresAt])
 }
 
 // Cryptographic key pairs (ECC P-521). Separate keys for ECDH (encryption) and ECDSA (signing).
@@ -60,11 +169,12 @@ model Key {
   encryptedPrivateKey String  // AES-256-GCM encrypted, base64
   privateIv          String   // base64 IV used to encrypt the private key
   fingerprint        String   // SHA-256 of public key DER
-  status             String   @default("ACTIVE") // ACTIVE | ROTATED | REVOKED
+  status             String   @default("ACTIVE") // ACTIVE | ROTATED | REVOKED | DESTROYED
   version            Int      @default(1)
   createdAt          DateTime @default(now())
   rotatedAt          DateTime?
-  // Back-relations for documents that used this key
+  revokedAt          DateTime?
+  revokedBy          String?
   sentDocuments      Document[] @relation("SenderKeyDocs")
   receivedDocuments  Document[] @relation("RecipientKeyDocs")
 
@@ -82,23 +192,22 @@ model Document {
   senderBranch       Branch   @relation("SenderDocs", fields: [senderBranchId], references: [id])
   recipientBranchId  String
   recipientBranch    Branch   @relation("RecipientDocs", fields: [recipientBranchId], references: [id])
-  // Secure package metadata (ciphertext stored on disk)
-  storagePath        String   // relative path to encrypted ciphertext blob
-  ephemeralPublicKey String   // base64 ephemeral ECDH public key (DER)
-  encryptedSessionKey String  // base64 AES-GCM encrypted session key
-  sessionIv          String   // base64 IV for session key encryption
-  sessionAuthTag     String   // base64 GCM auth tag for session key encryption
-  docIv              String   // base64 IV (96-bit) for document AES-256-GCM
-  authTag            String   // base64 128-bit GCM auth tag
-  signature          String   // base64 ECDSA-SHA512 signature over ciphertext
-  senderKeyId        String   // signing key used
-  recipientKeyId     String   // encryption key used
+  storagePath        String
+  ephemeralPublicKey String
+  encryptedSessionKey String
+  sessionIv          String
+  sessionAuthTag     String
+  docIv              String
+  authTag            String
+  signature          String
+  senderKeyId        String
+  recipientKeyId     String
   senderKey          Key      @relation("SenderKeyDocs", fields: [senderKeyId], references: [id])
   recipientKey       Key      @relation("RecipientKeyDocs", fields: [recipientKeyId], references: [id])
-  documentHash       String   // SHA-512 of plaintext (for integrity verification)
-  nonce              String   // 128-bit random nonce (replay protection)
+  documentHash       String
+  nonce              String
   packageVersion     String   @default("1.0")
-  status             String   @default("DELIVERED") // DELIVERED | DECRYPTED | FAILED
+  status             String   @default("DELIVERED") // DELIVERED | DECRYPTED | FAILED | PURGED
   createdAt          DateTime @default(now())
   decryptedAt        DateTime?
   auditLogs          AuditLog[]
@@ -108,11 +217,18 @@ model Document {
   @@index([createdAt])
 }
 
-// Immutable audit trail of all cryptographic operations
+// Immutable audit trail. Each row is append-only; no UPDATE path is used.
 model AuditLog {
   id          String   @id @default(cuid())
-  action      String   // UPLOAD | DOWNLOAD | VERIFY | KEY_GEN | KEY_ROTATE | KEY_REVOKE | BRANCH_CREATE | SEED
-  actor       String   // branch code or "SYSTEM"
+  action      String   // LOGIN | LOGOUT | LOGIN_FAILED | 2FA_ENROLL | 2FA_VERIFY | 2FA_FAIL
+                       // | UPLOAD | DOWNLOAD | KEY_GEN | KEY_ROTATE | KEY_REVOKE | KEY_DESTROY
+                       // | BRANCH_CREATE | SEED | SYSTEM_ACTIVATE | SYSTEM_DEACTIVATE
+                       // | LOCKDOWN | LOCKDOWN_RELEASE | USER_SUSPEND | USER_REACTIVATE
+                       // | USER_REVOKE | DEVICE_REGISTER | DEVICE_REVOKE | LICENSE_ISSUE
+                       // | LICENSE_REVOKE | LICENSE_VALIDATE | UNAUTHORIZED
+  actor       String   // username or "SYSTEM"
+  actorId     String?
+  actorUser   User?    @relation("ActorAuditLogs", fields: [actorId], references: [id], onDelete: SetNull)
   branchId    String?
   branch      Branch?  @relation(fields: [branchId], references: [id], onDelete: SetNull)
   documentId  String?
@@ -125,4 +241,5 @@ model AuditLog {
   @@index([action])
   @@index([createdAt])
   @@index([branchId])
+  @@index([actorId])
 }

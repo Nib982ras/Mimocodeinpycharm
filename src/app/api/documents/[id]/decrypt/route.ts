@@ -4,7 +4,7 @@ import { decryptDocument, decryptPrivateKey } from "@/lib/crypto";
 import { readCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
-import { requireUser, authErrorResponse } from "@/lib/auth";
+import { requireSystemActive, authErrorResponse, ROLE_RANK } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -19,7 +19,8 @@ export const dynamic = "force-dynamic";
  *  5. Verify the ECDSA-SHA512 signature over the ciphertext
  *  6. Verify the SHA-512 document integrity hash
  *
- * Access control: only the recipient branch's users (or an admin) may decrypt.
+ * Access control: only the recipient branch's users (or SECURITY_ADMIN+/OWNER) may decrypt.
+ * READONLY users may never decrypt. System-active/lockdown rules enforced (owner bypasses).
  */
 export async function POST(
   req: Request,
@@ -27,10 +28,17 @@ export async function POST(
 ) {
   let session;
   try {
-    session = await requireUser();
+    session = await requireSystemActive();
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Auth failed" }, { status: 500 });
+  }
+
+  if (session.role === "READONLY") {
+    return NextResponse.json(
+      { ok: false, error: "Read-only users cannot decrypt documents" },
+      { status: 403 }
+    );
   }
 
   const { id } = await params;
@@ -49,8 +57,9 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "Document not found" }, { status: 404 });
   }
 
-  // Authorization: the recipient branch's users, or an admin, may decrypt.
-  if (session.role !== "ADMIN" && doc.recipientBranchId !== session.branchId) {
+  // Authorization: the recipient branch's users, or SECURITY_ADMIN+/OWNER, may decrypt.
+  const isAdmin = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
+  if (!isAdmin && doc.recipientBranchId !== session.branchId) {
     await recordAudit({
       action: "DOWNLOAD",
       actor: session.username,

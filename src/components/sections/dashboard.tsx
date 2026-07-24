@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import {
   Network,
   FileLock2,
@@ -15,26 +15,50 @@ import {
   Lock,
   Unlock,
   Cpu,
+  Power,
+  PowerOff,
+  AlertOctagon,
+  BadgeCheck,
+  Smartphone,
+  ShieldAlert,
 } from "lucide-react";
 import { api } from "@/lib/api";
-import type { DashboardData, HierarchyNode, BranchType } from "@/lib/types";
+import type { DashboardData, HierarchyNode, BranchType, SystemStateResponse } from "@/lib/types";
 import { BRANCH_TYPE_META, formatRelativeTime, formatBytes } from "@/lib/format";
 import { Panel, PanelHeader, StatCard, Badge, EmptyState } from "./shared";
+import { Button } from "@/components/ui/button";
+import { Enable2faDialog, Disable2faDialog } from "./twofa";
+import { useAuth } from "@/components/auth-provider";
 import { cn } from "@/lib/utils";
 
 interface Props {
-  onNavigate: (id: "dashboard" | "documents" | "branches" | "keys" | "audit") => void;
+  onNavigate: (id: "dashboard" | "documents" | "branches" | "keys" | "audit" | "users" | "devices" | "licenses" | "system") => void;
 }
 
 export function DashboardSection({ onNavigate }: Props) {
+  const { user } = useAuth();
   const [data, setData] = useState<DashboardData | null>(null);
+  const [sys, setSys] = useState<SystemStateResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let alive = true;
-    api.dashboard().then((d) => alive && (setData(d), setLoading(false))).catch(() => alive && setLoading(false));
-    return () => { alive = false; };
+  const load = useCallback(async () => {
+    try {
+      const [d, s] = await Promise.all([
+        api.dashboard().catch(() => null),
+        api.systemState().catch(() => null),
+      ]);
+      if (d) setData(d);
+      if (s) setSys(s);
+    } catch {
+      /* 401 handled centrally */
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   if (loading || !data) {
     return (
@@ -47,6 +71,8 @@ export function DashboardSection({ onNavigate }: Props) {
   }
 
   const { stats } = data;
+  const sysState = sys?.state;
+  const sysCounts = sys?.counts;
 
   return (
     <div className="space-y-5">
@@ -57,6 +83,26 @@ export function DashboardSection({ onNavigate }: Props) {
         <StatCard label="Active Keys" value={stats.activeKeys} sub={`${stats.rotatedKeys} rotated`} icon={<KeyRound className="h-5 w-5" />} accent="cyan" />
         <StatCard label="Audit Events" value={stats.auditEvents} sub="immutable log" icon={<ScrollText className="h-5 w-5" />} accent="amber" />
       </div>
+
+      {/* System status + Security settings row */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        <SystemStatusCard
+          sys={sys}
+          onNavigate={onNavigate}
+          canManage={user?.role === "OWNER"}
+        />
+        <SecuritySettingsCard />
+      </div>
+
+      {/* Quick stats — devices / licenses */}
+      {sysCounts && (
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+          <StatCard label="Active Devices" value={sysCounts.activeDevices} sub={`${sysCounts.revokedDevices} revoked`} icon={<Cpu className="h-5 w-5" />} accent="emerald" />
+          <StatCard label="Active Licenses" value={sysCounts.activeLicenses} sub={`${sysCounts.revokedLicenses} revoked`} icon={<BadgeCheck className="h-5 w-5" />} accent="teal" />
+          <StatCard label="Active Users" value={sysCounts.activeUsers} sub={`${sysCounts.suspendedUsers} suspended`} icon={<Activity className="h-5 w-5" />} accent="cyan" />
+          <StatCard label="Total Users" value={sysCounts.users} sub="all roles" icon={<Building2 className="h-5 w-5" />} accent="amber" />
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* Hierarchy tree */}
@@ -88,9 +134,9 @@ export function DashboardSection({ onNavigate }: Props) {
               { layer: "Application", value: "Hybrid Encryption", color: "text-emerald-300" },
               { layer: "Symmetric", value: "AES-256-GCM", color: "text-teal-300" },
               { layer: "Key Exchange", value: "ECDH (P-521)", color: "text-cyan-300" },
-              { layer: "Signature", value: "ECDSA-SHA512", color: "text-sky-300" },
-              { layer: "KDF", value: "HKDF-SHA256", color: "text-indigo-300" },
-              { layer: "Transport", value: "TLS 1.3 (ECDHE)", color: "text-violet-300" },
+              { layer: "Signature", value: "ECDSA-SHA512", color: "text-emerald-300" },
+              { layer: "KDF", value: "HKDF-SHA256", color: "text-emerald-300" },
+              { layer: "Transport", value: "TLS 1.3 (ECDHE)", color: "text-teal-300" },
             ].map((row, i) => (
               <div key={row.layer} className="flex items-center gap-3">
                 <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-slate-800 border border-slate-700 text-[10px] font-mono text-slate-400">
@@ -203,6 +249,150 @@ export function DashboardSection({ onNavigate }: Props) {
         </div>
       </Panel>
     </div>
+  );
+}
+
+/** Compact system-status banner + jump-to-control-panel card. */
+function SystemStatusCard({
+  sys,
+  onNavigate,
+  canManage,
+}: {
+  sys: SystemStateResponse | null;
+  onNavigate: (id: "system") => void;
+  canManage: boolean;
+}) {
+  if (!sys) {
+    return (
+      <Panel className="lg:col-span-1">
+        <PanelHeader title="System Status" subtitle="Loading…" icon={<Power className="h-4 w-4" />} />
+        <div className="p-4">
+          <div className="h-16 rounded-lg bg-slate-800/40 animate-pulse" />
+        </div>
+      </Panel>
+    );
+  }
+  const s = sys.state;
+  const counts = sys.counts;
+  return (
+    <Panel className={cn("lg:col-span-1", s.lockdown && "border-rose-500/40")}>
+      <PanelHeader
+        title="System Status"
+        subtitle="Live system-wide state"
+        icon={s.lockdown ? <AlertOctagon className="h-4 w-4 text-rose-400" /> : s.active ? <Power className="h-4 w-4 text-emerald-400" /> : <PowerOff className="h-4 w-4 text-amber-400" />}
+        action={canManage ? (
+          <button onClick={() => onNavigate("system")} className="inline-flex items-center gap-1 text-xs text-emerald-400 hover:text-emerald-300">
+            Control panel <ChevronRight className="h-3 w-3" />
+          </button>
+        ) : undefined}
+      />
+      <div className="p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">System</span>
+          <Badge className={s.active ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" : "border-amber-500/40 bg-amber-500/10 text-amber-300"}>
+            <span className={cn("h-1.5 w-1.5 rounded-full", s.active ? "bg-emerald-400" : "bg-amber-400")} />
+            {s.active ? "Active" : "Deactivated"}
+          </Badge>
+        </div>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-slate-400">Lockdown</span>
+          <Badge className={s.lockdown ? "border-rose-500/40 bg-rose-500/10 text-rose-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"}>
+            <span className={cn("h-1.5 w-1.5 rounded-full", s.lockdown ? "bg-rose-400" : "bg-emerald-400")} />
+            {s.lockdown ? "Active" : "Clear"}
+          </Badge>
+        </div>
+        {s.lockdown && s.lockedBy && (
+          <div className="text-[11px] text-rose-300">
+            Locked by <span className="font-mono">{s.lockedBy}</span>{s.lockedAt && <> · {formatRelativeTime(s.lockedAt)}</>}
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2 pt-2 border-t border-slate-800">
+          <div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wide">Devices</div>
+            <div className="text-sm font-mono text-slate-200">{counts.activeDevices} <span className="text-slate-500">/ {counts.devices}</span></div>
+          </div>
+          <div>
+            <div className="text-[10px] text-slate-500 uppercase tracking-wide">Licenses</div>
+            <div className="text-sm font-mono text-slate-200">{counts.activeLicenses} <span className="text-slate-500">/ {counts.licenses}</span></div>
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+/** Security settings card — 2FA enable/disable for the current user. */
+function SecuritySettingsCard() {
+  const { user } = useAuth();
+  const [enableOpen, setEnableOpen] = useState(false);
+  const [disableOpen, setDisableOpen] = useState(false);
+
+  if (!user) return null;
+
+  return (
+    <>
+      <Panel className="lg:col-span-2">
+        <PanelHeader
+          title="Security Settings"
+          subtitle="Two-factor authentication for your account"
+          icon={<ShieldCheck className="h-4 w-4" />}
+        />
+        <div className="p-4 space-y-3">
+          <div className="flex items-start gap-3">
+            <div className={cn(
+              "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ring-1",
+              user.twoFactorEnabled
+                ? "bg-emerald-500/15 text-emerald-400 ring-emerald-500/30"
+                : "bg-amber-500/15 text-amber-400 ring-amber-500/30"
+            )}>
+              <Smartphone className="h-5 w-5" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-sm font-medium text-slate-200">Two-Factor Authentication</span>
+                <Badge className={user.twoFactorEnabled ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" : "border-amber-500/40 bg-amber-500/10 text-amber-300"}>
+                  {user.twoFactorEnabled ? "Enabled" : "Disabled"}
+                </Badge>
+                {user.twoFactorEnforced && !user.twoFactorEnabled && (
+                  <Badge className="border-rose-500/40 bg-rose-500/10 text-rose-300">
+                    <ShieldAlert className="h-3 w-3" /> Enforced
+                  </Badge>
+                )}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {user.twoFactorEnabled
+                  ? "Your account requires a TOTP code (or backup code) on every login."
+                  : user.twoFactorEnforced
+                    ? "Your role requires 2FA — enable it now to comply with policy."
+                    : "Add a TOTP factor so a stolen password alone can't compromise your account."}
+              </p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            {user.twoFactorEnabled ? (
+              <Button
+                onClick={() => setDisableOpen(true)}
+                variant="outline"
+                className="border-rose-500/40 text-rose-300 hover:bg-rose-500/10 hover:text-rose-200"
+              >
+                <ShieldAlert className="h-4 w-4" />
+                Disable 2FA
+              </Button>
+            ) : (
+              <Button
+                onClick={() => setEnableOpen(true)}
+                className="bg-emerald-600 hover:bg-emerald-500 text-white"
+              >
+                <ShieldCheck className="h-4 w-4" /> Enable 2FA
+              </Button>
+            )}
+          </div>
+        </div>
+      </Panel>
+
+      <Enable2faDialog open={enableOpen} onOpenChange={setEnableOpen} />
+      <Disable2faDialog open={disableOpen} onOpenChange={setDisableOpen} />
+    </>
   );
 }
 

@@ -94,4 +94,59 @@ export const api = {
     const s = qs.toString();
     return json<{ ok: boolean; counts: Record<string, number>; logs: import("@/lib/types").AuditLogRecord[] }>(`/api/audit${s ? `?${s}` : ""}`);
   },
+  // ---- System control (owner) ----
+  systemState: () => json<import("@/lib/types").SystemStateResponse>("/api/system/state"),
+  activateSystem: () => json<{ ok: boolean; active: boolean }>("/api/system/activate", { method: "POST" }),
+  deactivateSystem: (reason: string) => json<{ ok: boolean; active: boolean; reason: string }>("/api/system/deactivate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) }),
+  lockdown: (reason: string) => json<{ ok: boolean; lockdown: boolean; reason: string; sessionsRevoked: number }>("/api/system/lockdown", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) }),
+  releaseLockdown: () => json<{ ok: boolean; lockdown: boolean }>("/api/system/release", { method: "POST" }),
+  // ---- 2FA ----
+  setup2fa: () => json<{ ok: boolean; secret: string; otpauthUri: string; backupCodes: string[] }>("/api/2fa/setup", { method: "POST" }),
+  verify2fa: (code: string) => json<{ ok: boolean }>("/api/2fa/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) }),
+  disable2fa: (userId?: string) => json<{ ok: boolean }>("/api/2fa/disable", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ userId }) }),
+  // ---- User management (extended) ----
+  suspendUser: (id: string, suspend: boolean, reason?: string) => json<{ ok: boolean; status: string }>(`/api/users/${id}/suspend`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ suspend, reason }) }),
+  usersRaw: () =>
+    json<{
+      ok: boolean;
+      actor: string;
+      users: Array<{
+        id: string;
+        username: string;
+        displayName: string;
+        role: import("@/lib/types").Role;
+        status: import("@/lib/types").UserStatus;
+        branchId: string | null;
+        branch: { id: string; code: string; name: string; type: string } | null;
+        twoFactorEnabled: boolean;
+        twoFactorEnforced: boolean;
+        createdAt: string;
+      }>;
+    }>("/api/users"),
+  createUserRaw: (data: { username: string; displayName?: string; password: string; role: string; branchId?: string | null }) =>
+    json<{ ok: boolean; error?: string; user: import("@/lib/types").SessionUser }>("/api/users", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  deleteUserRaw: (id: string) =>
+    json<{ ok: boolean; error?: string }>(`/api/users/${id}`, { method: "DELETE" }),
+  resetPasswordRaw: (id: string, password: string) =>
+    json<{ ok: boolean; error?: string }>(`/api/users/${id}/password`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    }),
+  // ---- Devices ----
+  devices: () => json<{ ok: boolean; devices: import("@/lib/types").DeviceRecord[] }>("/api/devices"),
+  registerDevice: (name: string, publicKeyPem: string) => json<{ ok: boolean; device: import("@/lib/types").DeviceRecord }>("/api/devices", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name, publicKeyPem }) }),
+  revokeDevice: (id: string) => json<{ ok: boolean }>(`/api/devices/${id}/revoke`, { method: "POST" }),
+  // ---- Licenses ----
+  licenses: () => json<{ ok: boolean; licenses: import("@/lib/types").LicenseRecord[] }>("/api/licenses"),
+  issueLicense: (deviceId: string, tier: string, expiresInDays: number) => json<{ ok: boolean; license: import("@/lib/types").LicenseRecord }>("/api/licenses", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceId, tier, expiresInDays }) }),
+  revokeLicense: (id: string, reason?: string) => json<{ ok: boolean }>(`/api/licenses/${id}/revoke`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reason }) }),
+  validateLicense: (licenseKey: string, deviceFingerprint: string) => json<{ ok: boolean; valid: boolean; reason?: string }>("/api/licenses/validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ licenseKey, deviceFingerprint }) }),
+  // ---- Key destruction (owner) ----
+  revokeKey: (id: string, purgeDocuments?: boolean) => json<{ ok: boolean; status: string; purgedDocuments: number }>(`/api/keys/${id}/revoke`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ purgeDocuments }) }),
 };
+

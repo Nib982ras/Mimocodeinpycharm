@@ -1,17 +1,24 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdmin, authErrorResponse, hashPassword } from "@/lib/auth";
+import { requireSecurityAdmin, authErrorResponse, hashPassword, type Role } from "@/lib/auth";
 import { recordAudit } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/users — list all users (admin only). */
+const VALID_ROLES: Role[] = ["OWNER", "SECURITY_ADMIN", "BRANCH_ADMIN", "USER", "READONLY"];
+/** Roles that must be tied to a specific branch. */
+const BRANCH_REQUIRED_ROLES: Role[] = ["BRANCH_ADMIN", "USER", "READONLY"];
+
+/** GET /api/users — list all users (SECURITY_ADMIN+). */
 export async function GET() {
   try {
-    const admin = await requireAdmin();
+    const admin = await requireSecurityAdmin();
     const users = await db.user.findMany({
       orderBy: [{ role: "asc" }, { username: "asc" }],
-      include: { branch: { select: { id: true, code: true, name: true, type: true } } },
+      include: {
+        branch: { select: { id: true, code: true, name: true, type: true } },
+        twoFactor: { select: { enabled: true, enforced: true } },
+      },
     });
     return NextResponse.json({
       ok: true,
@@ -21,8 +28,11 @@ export async function GET() {
         username: u.username,
         displayName: u.displayName,
         role: u.role,
+        status: u.status,
         branchId: u.branchId,
         branch: u.branch,
+        twoFactorEnabled: u.twoFactor?.enabled ?? false,
+        twoFactorEnforced: u.twoFactor?.enforced ?? false,
         createdAt: u.createdAt.toISOString(),
       })),
     });
@@ -32,10 +42,12 @@ export async function GET() {
   }
 }
 
-/** POST /api/users — create a new user (admin only). */
+/** POST /api/users — create a new user (SECURITY_ADMIN+).
+ *  Any role EXCEPT "OWNER" may be created (there can only ever be one owner).
+ */
 export async function POST(req: Request) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requireSecurityAdmin();
     const body = await req.json().catch(() => ({}));
     const { username, displayName, password, role, branchId } = body as {
       username?: string;
@@ -51,12 +63,19 @@ export async function POST(req: Request) {
         { status: 400 }
       );
     }
-    if (role !== "ADMIN" && role !== "USER") {
+    if (role === "OWNER") {
+      return NextResponse.json(
+        { ok: false, error: "Owner role cannot be created" },
+        { status: 400 }
+      );
+    }
+    if (!VALID_ROLES.includes(role as Role)) {
       return NextResponse.json({ ok: false, error: "Invalid role" }, { status: 400 });
     }
-    if (role === "USER" && !branchId) {
+    const branchRequired = BRANCH_REQUIRED_ROLES.includes(role as Role);
+    if (branchRequired && !branchId) {
       return NextResponse.json(
-        { ok: false, error: "USER accounts must be assigned to a branch" },
+        { ok: false, error: `${role} accounts must be assigned to a branch` },
         { status: 400 }
       );
     }
@@ -73,9 +92,13 @@ export async function POST(req: Request) {
         displayName: displayName || uname,
         passwordHash: hashPassword(password),
         role,
-        branchId: role === "ADMIN" ? null : branchId,
+        status: "ACTIVE",
+        branchId: branchRequired ? branchId : (branchId ?? null),
       },
-      include: { branch: { select: { id: true, code: true, name: true, type: true } } },
+      include: {
+        branch: { select: { id: true, code: true, name: true, type: true } },
+        twoFactor: { select: { enabled: true, enforced: true } },
+      },
     });
 
     await recordAudit({
@@ -98,8 +121,11 @@ export async function POST(req: Request) {
         username: user.username,
         displayName: user.displayName,
         role: user.role,
+        status: user.status,
         branchId: user.branchId,
         branch: user.branch,
+        twoFactorEnabled: user.twoFactor?.enabled ?? false,
+        twoFactorEnforced: user.twoFactor?.enforced ?? false,
         createdAt: user.createdAt.toISOString(),
       },
     });

@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, useCallback, useRef, type ReactNode } from "react";
 import { io, type Socket } from "socket.io-client";
+import { ROLE_RANK, type SessionUser as SessionUserType } from "@/lib/types";
 
 /**
  * Auth context — replaces the old ClientMode.
@@ -10,18 +11,14 @@ import { io, type Socket } from "socket.io-client";
  * shows the login screen. Once authenticated, the hub connection is established
  * automatically using the user's branch identity (no manual identity picker).
  *
- * Admin users (role=ADMIN) have no branch and therefore don't join the hub as a
- * branch client — they observe. Regular users (role=USER) join as their branch.
+ * Regular branch users (USER / BRANCH_ADMIN) join the exchange hub as their
+ * branch; SECURITY_ADMIN+ observe without joining.
+ *
+ * Login supports 2FA: if the backend returns `{ ok:false, requiresTwoFactor:true }`,
+ * the caller collects a 6-digit TOTP code (or an 8-char backup code) and resubmits.
  */
 
-export interface SessionUser {
-  id: string;
-  username: string;
-  displayName: string;
-  role: "ADMIN" | "USER";
-  branchId: string | null;
-  branch: { id: string; code: string; name: string; type: string } | null;
-}
+export type SessionUser = SessionUserType;
 
 export interface OnlineClient {
   socketId: string;
@@ -40,10 +37,16 @@ export interface LiveNotification {
   createdAt: number;
 }
 
+export interface LoginResult {
+  ok: boolean;
+  requiresTwoFactor?: boolean;
+  error?: string;
+}
+
 interface AuthValue {
   user: SessionUser | null;
   loading: boolean;
-  login: (username: string, password: string) => Promise<{ ok: boolean; error?: string }>;
+  login: (username: string, password: string, totpCode?: string, backupCode?: string) => Promise<LoginResult>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   // Hub state
@@ -68,7 +71,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const res = await fetch("/api/auth/me", { credentials: "include" });
       const data = await res.json();
-      setUser(data.user ?? null);
+      setUser((data.user as SessionUser | null) ?? null);
     } catch {
       setUser(null);
     } finally {
@@ -103,19 +106,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const login = useCallback(
-    async (username: string, password: string): Promise<{ ok: boolean; error?: string }> => {
+    async (
+      username: string,
+      password: string,
+      totpCode?: string,
+      backupCode?: string
+    ): Promise<LoginResult> => {
       try {
         const res = await fetch("/api/auth/login", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ username, password }),
+          body: JSON.stringify({ username, password, totpCode, backupCode }),
           credentials: "include",
         });
         const data = await res.json();
-        if (!res.ok || !data.ok) {
+        if (!res.ok) {
+          // 2FA prompt — backend returns 200 with requiresTwoFactor, but be defensive.
+          if (data.requiresTwoFactor) return { ok: false, requiresTwoFactor: true };
           return { ok: false, error: data.error || "Login failed" };
         }
-        setUser(data.user);
+        if (!data.ok) {
+          if (data.requiresTwoFactor) return { ok: false, requiresTwoFactor: true };
+          return { ok: false, error: data.error || "Login failed" };
+        }
+        setUser(data.user as SessionUser);
         return { ok: true };
       } catch {
         return { ok: false, error: "Network error" };
@@ -142,12 +156,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const clearNotifications = useCallback(() => setNotifications([]), []);
 
   // Establish the hub connection whenever the user changes.
-  // Only USER accounts (with a branch) join as a branch client.
+  // Only branch-attached accounts (USER / BRANCH_ADMIN) join as a branch client.
   useEffect(() => {
-    if (!user || user.role !== "USER" || !user.branch) {
-      return;
-    }
-    const identity = user.branch;
+    if (!user) return;
+    // SECURITY_ADMIN+ observe but don't join as a branch client.
+    const isBranchUser =
+      (user.role === "USER" || user.role === "BRANCH_ADMIN") && !!user.branch;
+    if (!isBranchUser) return;
+    const identity = user.branch!;
     const sock = io("/?XTransformPort=3003", {
       transports: ["websocket", "polling"],
       forceNew: true,
@@ -240,6 +256,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setOnlineClients([]);
     };
   }, [user?.id, pushNotification]);
+
+  // Expose ROLE_RANK indirectly through the context value via `user.role`.
+  void ROLE_RANK;
 
   return (
     <AuthContext.Provider

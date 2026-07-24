@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { generateEcKeyPair, encryptPrivateKey, type KeyPairPem } from "@/lib/crypto";
 import { recordAudit } from "@/lib/audit";
-import { requireAdmin, authErrorResponse } from "@/lib/auth";
+import { requireSecurityAdmin, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-/** POST /api/keys/[id]/rotate — rotate an existing key pair (admin only).
+/** POST /api/keys/[id]/rotate — rotate an existing key pair (SECURITY_ADMIN+).
  *  Marks the old key as ROTATED and provisions a new ACTIVE key (v+1).
  */
 export async function POST(
@@ -14,7 +14,7 @@ export async function POST(
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requireSecurityAdmin();
     const { id } = await params;
 
     const oldKey = await db.key.findUnique({

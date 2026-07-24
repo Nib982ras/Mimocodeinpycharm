@@ -39,6 +39,7 @@ const STATUS_META: Record<KeyStatus, { color: string; label: string }> = {
   ACTIVE: { color: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", label: "Active" },
   ROTATED: { color: "border-slate-600 bg-slate-700/30 text-slate-400", label: "Rotated" },
   REVOKED: { color: "border-rose-500/40 bg-rose-500/10 text-rose-300", label: "Revoked" },
+  DESTROYED: { color: "border-rose-500/50 bg-rose-500/20 text-rose-200", label: "Destroyed" },
 };
 
 const PURPOSE_META: Record<KeyPurpose, { color: string; label: string; icon: string }> = {

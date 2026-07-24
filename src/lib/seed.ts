@@ -118,24 +118,56 @@ export async function seedDatabase(): Promise<{ branches: number; keys: number; 
   });
 
   // Provision user accounts:
-  //   - one administrator (no branch)
-  //   - one user per department (username = lowercased branch code, password = same)
+  //   - one OWNER (supreme authority — system activation, lockdown, key destruction)
+  //   - one SECURITY_ADMIN (user/branch/key management)
+  //   - one BRANCH_ADMIN per region (manages their region's departments)
+  //   - one USER per department
+  //   - one READONLY user on a sub-branch
   const departments = await db.branch.findMany({ where: { type: "DEPARTMENT" } });
+  const regions = await db.branch.findMany({ where: { type: "REGIONAL" } });
+  const subBranches = await db.branch.findMany({ where: { type: "SUB_BRANCH" } });
   const usersCreated: { username: string; role: string; branch: string }[] = [];
 
-  // Admin account
+  // 1. System owner — sole supreme authority. No branch.
   await db.user.create({
     data: {
-      username: "admin",
-      displayName: "System Administrator",
-      passwordHash: hashPassword("admin123"),
-      role: "ADMIN",
+      username: "owner",
+      displayName: "System Owner",
+      passwordHash: hashPassword("owner123"),
+      role: "OWNER",
       branchId: null,
     },
   });
-  usersCreated.push({ username: "admin", role: "ADMIN", branch: "—" });
+  usersCreated.push({ username: "owner", role: "OWNER", branch: "—" });
 
-  // One user per department — username/password = lowercased code (e.g. dept-a1 / dept-a1)
+  // 2. Security administrator
+  await db.user.create({
+    data: {
+      username: "secadmin",
+      displayName: "Security Administrator",
+      passwordHash: hashPassword("secadmin123"),
+      role: "SECURITY_ADMIN",
+      branchId: null,
+    },
+  });
+  usersCreated.push({ username: "secadmin", role: "SECURITY_ADMIN", branch: "—" });
+
+  // 3. One branch admin per regional hub
+  for (const reg of regions) {
+    const username = `${reg.code.toLowerCase()}-admin`;
+    await db.user.create({
+      data: {
+        username,
+        displayName: `${reg.name} Administrator`,
+        passwordHash: hashPassword(username),
+        role: "BRANCH_ADMIN",
+        branchId: reg.id,
+      },
+    });
+    usersCreated.push({ username, role: "BRANCH_ADMIN", branch: reg.code });
+  }
+
+  // 4. One USER per department — username/password = lowercased code
   for (const dept of departments) {
     const username = dept.code.toLowerCase();
     await db.user.create({
@@ -150,13 +182,40 @@ export async function seedDatabase(): Promise<{ branches: number; keys: number; 
     usersCreated.push({ username, role: "USER", branch: dept.code });
   }
 
+  // 5. One READONLY user on the first sub-branch
+  if (subBranches.length > 0) {
+    const sub = subBranches[0];
+    const username = `${sub.code.toLowerCase()}-viewer`;
+    await db.user.create({
+      data: {
+        username,
+        displayName: `${sub.name} (Read-Only)`,
+        passwordHash: hashPassword(username),
+        role: "READONLY",
+        branchId: sub.id,
+      },
+    });
+    usersCreated.push({ username, role: "READONLY", branch: sub.code });
+  }
+
+  // Initialize the singleton SystemState (active, not locked down).
+  await db.systemState.upsert({
+    where: { id: "singleton" },
+    update: {},
+    create: { id: "singleton", active: true, lockdown: false },
+  });
+
   await recordAudit({
     action: "SEED",
     actor: "SYSTEM",
     status: "SUCCESS",
     details: {
       usersCreated: usersCreated.length,
-      message: "Seeded admin + one user per department",
+      message: "Seeded owner + security admin + branch admins + department users + readonly viewer",
+      roles: usersCreated.reduce((acc, u) => {
+        acc[u.role] = (acc[u.role] ?? 0) + 1;
+        return acc;
+      }, {} as Record<string, number>),
     },
   });
 
@@ -169,9 +228,14 @@ export async function seedDatabase(): Promise<{ branches: number; keys: number; 
 
 /** Reset the database (used by the re-seed endpoint). */
 export async function resetDatabase(): Promise<void> {
+  await db.session.deleteMany();
   await db.auditLog.deleteMany();
   await db.document.deleteMany();
+  await db.license.deleteMany();
+  await db.device.deleteMany();
+  await db.twoFactor.deleteMany();
   await db.key.deleteMany();
   await db.user.deleteMany();
+  await db.systemState.deleteMany();
   await db.branch.deleteMany();
 }

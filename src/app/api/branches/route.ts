@@ -7,7 +7,7 @@ import {
 } from "@/lib/crypto";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
-import { requireUser, requireAdmin, authErrorResponse } from "@/lib/auth";
+import { requireUser, requireSecurityAdmin, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -33,10 +33,10 @@ export async function GET() {
   }
 }
 
-/** POST /api/branches — create a new branch and provision its ECC key pairs (admin only). */
+/** POST /api/branches — create a new branch and provision its ECC key pairs (SECURITY_ADMIN+). */
 export async function POST(req: Request) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requireSecurityAdmin();
     const body = await req.json().catch(() => ({}));
     const { name, code, type, region, parentId } = body as {
       name?: string;

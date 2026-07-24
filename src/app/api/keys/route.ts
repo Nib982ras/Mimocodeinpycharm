@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdmin, authErrorResponse } from "@/lib/auth";
+import { requireSecurityAdmin, authErrorResponse } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/keys — list all keys (admin only). */
+/** GET /api/keys — list all keys (SECURITY_ADMIN+). */
 export async function GET() {
   try {
-    await requireAdmin();
+    await requireSecurityAdmin();
     const keys = await db.key.findMany({
       orderBy: [{ createdAt: "desc" }],
       include: { branch: { select: { id: true, code: true, name: true, type: true } } },

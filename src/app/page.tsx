@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   LayoutDashboard,
   FileLock2,
@@ -11,6 +11,12 @@ import {
   Menu,
   Lock,
   Users,
+  Cpu,
+  BadgeCheck,
+  Server,
+  AlertOctagon,
+  PowerOff,
+  Crown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -29,25 +35,34 @@ import { BranchesSection } from "@/components/sections/branches";
 import { KeysSection } from "@/components/sections/keys";
 import { AuditSection } from "@/components/sections/audit";
 import { UsersSection } from "@/components/sections/users";
+import { DevicesSection } from "@/components/sections/devices";
+import { LicensesSection } from "@/components/sections/licenses";
+import { SystemSection } from "@/components/sections/system";
 import { Loader2 } from "lucide-react";
+import { api } from "@/lib/api";
+import { hasMinRole, type Role, type SystemState } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
-type SectionId = "dashboard" | "documents" | "branches" | "keys" | "audit" | "users";
+type SectionId = "dashboard" | "documents" | "branches" | "keys" | "audit" | "users" | "devices" | "licenses" | "system";
 
 interface NavItem {
   id: SectionId;
   label: string;
   description: string;
   icon: typeof LayoutDashboard;
-  adminOnly?: boolean;
+  minRole?: Role; // defaults to READONLY (visible to all)
 }
 
 const NAV: NavItem[] = [
   { id: "dashboard", label: "Dashboard", description: "System overview", icon: LayoutDashboard },
   { id: "documents", label: "Documents", description: "Encrypt & exchange", icon: FileLock2 },
-  { id: "branches", label: "Branches", description: "Network hierarchy", icon: Network, adminOnly: true },
-  { id: "keys", label: "Key Vault", description: "ECC key management", icon: KeyRound, adminOnly: true },
-  { id: "users", label: "Users", description: "Account management", icon: Users, adminOnly: true },
+  { id: "branches", label: "Branches", description: "Network hierarchy", icon: Network, minRole: "SECURITY_ADMIN" },
+  { id: "keys", label: "Key Vault", description: "ECC key management", icon: KeyRound, minRole: "SECURITY_ADMIN" },
+  { id: "users", label: "Users", description: "Account management", icon: Users, minRole: "SECURITY_ADMIN" },
+  { id: "devices", label: "Devices", description: "Public-key devices", icon: Cpu, minRole: "SECURITY_ADMIN" },
+  { id: "licenses", label: "Licenses", description: "Signed device licenses", icon: BadgeCheck, minRole: "SECURITY_ADMIN" },
   { id: "audit", label: "Audit Log", description: "Immutable trail", icon: ScrollText },
+  { id: "system", label: "System", description: "Owner control panel", icon: Server, minRole: "OWNER" },
 ];
 
 const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
@@ -56,7 +71,18 @@ const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
   branches: { title: "Branch Network Topology", subtitle: "Hierarchical organization with mesh sub-networks" },
   keys: { title: "Cryptographic Key Vault", subtitle: "ECC P-521 key lifecycle management" },
   users: { title: "User Account Management", subtitle: "Provision and manage department & administrator logins" },
+  devices: { title: "Device Registry", subtitle: "Public-key-bound devices and their fingerprints" },
+  licenses: { title: "Cryptographic Licenses", subtitle: "ECDSA-P521-SHA512 signed device licenses" },
   audit: { title: "Immutable Audit Trail", subtitle: "Tamper-evident log of all cryptographic operations" },
+  system: { title: "Owner Control Panel", subtitle: "System activation, emergency lockdown, and key destruction" },
+};
+
+const ROLE_HEADER_META: Record<Role, { label: string; className: string; icon: typeof Crown }> = {
+  OWNER: { label: "Owner", className: "border-amber-500/40 bg-amber-500/10 text-amber-300", icon: Crown },
+  SECURITY_ADMIN: { label: "Sec Admin", className: "border-rose-500/40 bg-rose-500/10 text-rose-300", icon: ShieldCheck },
+  BRANCH_ADMIN: { label: "Branch Admin", className: "border-violet-500/40 bg-violet-500/10 text-violet-300", icon: Users },
+  USER: { label: "User", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", icon: Users },
+  READONLY: { label: "Read-only", className: "border-slate-600 bg-slate-700/30 text-slate-300", icon: Users },
 };
 
 export default function Home() {
@@ -71,6 +97,25 @@ function Shell() {
   const { user, loading } = useAuth();
   const [section, setSection] = useState<SectionId>("dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [sysState, setSysState] = useState<SystemState | null>(null);
+
+  // Lightly poll the system state (every 15s) so the header badge reflects
+  // lockdown / deactivated conditions without requiring the user to navigate.
+  useEffect(() => {
+    if (!user) return;
+    let alive = true;
+    const tick = async () => {
+      try {
+        const res = await api.systemState();
+        if (alive) setSysState(res.state);
+      } catch {
+        /* 401 handled centrally */
+      }
+    };
+    tick();
+    const t = setInterval(tick, 15000);
+    return () => { alive = false; clearInterval(t); };
+  }, [user]);
 
   const navigate = useCallback((id: SectionId) => {
     setSection(id);
@@ -94,10 +139,17 @@ function Shell() {
     return <LoginScreen />;
   }
 
-  const isAdmin = user.role === "ADMIN";
-  // Guard: if a non-admin somehow has a non-admin-only section selected, reset.
-  const activeSection = NAV.find((n) => n.id === section && (!n.adminOnly || isAdmin)) ? section : "dashboard";
-  const visibleNav = NAV.filter((n) => !n.adminOnly || isAdmin);
+  const canSee = (item: NavItem) => hasMinRole(user.role, item.minRole ?? "READONLY");
+  const visibleNav = NAV.filter(canSee);
+
+  // Guard: if the active section is no longer visible (e.g. role changed),
+  // reset to the dashboard.
+  const activeItem = NAV.find((n) => n.id === section);
+  const activeSection = activeItem && canSee(activeItem) ? section : "dashboard";
+
+  const roleMeta = ROLE_HEADER_META[user.role as Role] ?? ROLE_HEADER_META.USER;
+  const RoleIcon = roleMeta.icon;
+  const isPrivileged = hasMinRole(user.role, "SECURITY_ADMIN");
 
   const sidebar = (
     <div className="flex h-full flex-col">
@@ -115,17 +167,20 @@ function Shell() {
         {visibleNav.map((item) => {
           const active = activeSection === item.id;
           const Icon = item.icon;
+          const isOwnerOnly = item.minRole === "OWNER";
           return (
             <button
               key={item.id}
               onClick={() => navigate(item.id)}
-              className={`group w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-all ${
+              className={cn(
+                "group w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-all",
                 active
                   ? "bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/30"
-                  : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-200"
-              }`}
+                  : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-200",
+                isOwnerOnly && !active && "text-amber-500/80 hover:text-amber-300"
+              )}
             >
-              <Icon className={`h-[18px] w-[18px] shrink-0 ${active ? "text-emerald-400" : "text-slate-500 group-hover:text-slate-300"}`} />
+              <Icon className={cn("h-[18px] w-[18px] shrink-0", active ? "text-emerald-400" : isOwnerOnly ? "text-amber-500/80 group-hover:text-amber-300" : "text-slate-500 group-hover:text-slate-300")} />
               <div className="min-w-0">
                 <div className="text-sm font-medium leading-tight">{item.label}</div>
                 <div className="text-[11px] text-slate-500 leading-tight">{item.description}</div>
@@ -187,13 +242,29 @@ function Shell() {
                 <p className="text-xs md:text-sm text-slate-400 leading-tight truncate">{meta.subtitle}</p>
               </div>
 
-              {/* User menu + notifications + role badge */}
+              {/* System status indicators */}
+              <div className="hidden sm:flex items-center gap-1.5">
+                {sysState?.lockdown && (
+                  <div className="flex items-center gap-1.5 rounded-full border border-rose-500/40 bg-rose-500/10 px-2.5 py-1.5 animate-pulse">
+                    <AlertOctagon className="h-3.5 w-3.5 text-rose-400" />
+                    <span className="text-[11px] font-bold text-rose-300 tracking-wide">LOCKDOWN</span>
+                  </div>
+                )}
+                {sysState && !sysState.active && (
+                  <div className="flex items-center gap-1.5 rounded-full border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5">
+                    <PowerOff className="h-3.5 w-3.5 text-amber-400" />
+                    <span className="text-[11px] font-bold text-amber-300 tracking-wide">DEACTIVATED</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Role badge + notifications + user menu */}
               <div className="flex items-center gap-2">
                 <NotificationsBell />
-                {isAdmin && (
-                  <div className="hidden sm:flex items-center gap-2 rounded-full border border-amber-500/40 bg-amber-500/10 px-3 py-1.5">
-                    <ShieldCheck className="h-4 w-4 text-amber-400" />
-                    <span className="text-xs font-medium text-amber-300">Admin</span>
+                {isPrivileged && (
+                  <div className={cn("hidden sm:flex items-center gap-2 rounded-full border px-3 py-1.5", roleMeta.className)}>
+                    <RoleIcon className="h-4 w-4" />
+                    <span className="text-xs font-medium">{roleMeta.label}</span>
                   </div>
                 )}
                 <UserMenu />
@@ -207,7 +278,10 @@ function Shell() {
             {activeSection === "branches" && <BranchesSection />}
             {activeSection === "keys" && <KeysSection />}
             {activeSection === "users" && <UsersSection />}
+            {activeSection === "devices" && <DevicesSection />}
+            {activeSection === "licenses" && <LicensesSection />}
             {activeSection === "audit" && <AuditSection />}
+            {activeSection === "system" && <SystemSection />}
           </main>
 
           <footer className="mt-auto border-t border-slate-800 bg-slate-900/40 px-4 md:px-6 py-3">
@@ -219,6 +293,7 @@ function Shell() {
                 <span>v2.0</span>
                 <span className="text-slate-700">•</span>
                 <span className="text-emerald-400">@{user.username}</span>
+                <span className="text-slate-600">· {roleMeta.label}</span>
                 {user.branch && <span className="text-slate-600">· {user.branch.code}</span>}
               </div>
               <div className="flex items-center gap-3 font-mono">

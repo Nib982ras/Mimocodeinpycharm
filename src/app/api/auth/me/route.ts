@@ -16,8 +16,11 @@ export async function GET() {
       username: session.username,
       displayName: session.displayName,
       role: session.role,
+      status: session.status,
       branchId: session.branchId,
       branch: session.branch,
+      twoFactorEnabled: session.twoFactorEnabled,
+      twoFactorEnforced: session.twoFactorEnforced,
     },
   });
 }

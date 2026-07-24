@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireUser, authErrorResponse } from "@/lib/auth";
+import { requireUser, authErrorResponse, ROLE_RANK } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 /** GET /api/audit — paginated audit log.
- *  Admins see all events; regular users see only their own branch's events.
+ *  SECURITY_ADMIN+ sees all events; other roles see only their own branch's events.
  */
 export async function GET(req: Request) {
   try {
@@ -15,10 +15,11 @@ export async function GET(req: Request) {
     const status = url.searchParams.get("status");
     const limit = Math.min(parseInt(url.searchParams.get("limit") || "100", 10), 500);
 
+    const isAdmin = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
     const where: Record<string, unknown> = {};
     if (action) where.action = action;
     if (status) where.status = status;
-    if (session.role !== "ADMIN") {
+    if (!isAdmin) {
       // Regular users only see audit events tied to their branch.
       where.branchId = session.branchId;
     }
@@ -36,7 +37,7 @@ export async function GET(req: Request) {
     const actionCounts = await db.auditLog.groupBy({
       by: ["action"],
       _count: true,
-      where: session.role !== "ADMIN" ? { branchId: session.branchId } : undefined,
+      where: !isAdmin ? { branchId: session.branchId } : undefined,
     });
 
     return NextResponse.json({

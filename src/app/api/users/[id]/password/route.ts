@@ -1,17 +1,17 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireAdmin, authErrorResponse, hashPassword } from "@/lib/auth";
+import { requireSecurityAdmin, authErrorResponse, hashPassword } from "@/lib/auth";
 import { recordAudit } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
-/** POST /api/users/[id]/password — reset a user's password (admin only). */
+/** POST /api/users/[id]/password — reset a user's password (SECURITY_ADMIN+). */
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const admin = await requireAdmin();
+    const admin = await requireSecurityAdmin();
     const { id } = await params;
     const body = await req.json().catch(() => ({}));
     const { password } = body as { password?: string };

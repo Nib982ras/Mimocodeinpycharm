@@ -4,8 +4,6 @@ import { useState } from "react";
 import { useAuth, type LiveNotification } from "@/components/auth-provider";
 import {
   Users,
-  Wifi,
-  WifiOff,
   Bell,
   X,
   Send,
@@ -15,6 +13,9 @@ import {
   LogOut,
   ShieldCheck,
   UserCircle2,
+  Crown,
+  UserCog,
+  Eye,
 } from "lucide-react";
 import { Panel, Badge } from "@/components/sections/shared";
 import {
@@ -24,7 +25,16 @@ import {
 } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { BRANCH_TYPE_META, formatRelativeTime } from "@/lib/format";
+import { hasMinRole, type Role } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+const ROLE_BADGE_META: Record<Role, { label: string; className: string; icon: typeof Crown }> = {
+  OWNER: { label: "Owner", className: "border-amber-500/40 bg-amber-500/10 text-amber-300", icon: Crown },
+  SECURITY_ADMIN: { label: "Sec Admin", className: "border-rose-500/40 bg-rose-500/10 text-rose-300", icon: ShieldCheck },
+  BRANCH_ADMIN: { label: "Branch Admin", className: "border-violet-500/40 bg-violet-500/10 text-violet-300", icon: UserCog },
+  USER: { label: "User", className: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", icon: Users },
+  READONLY: { label: "Read-only", className: "border-slate-600 bg-slate-700/30 text-slate-300", icon: Eye },
+};
 
 /** Header widget showing the signed-in user + logout. */
 export function UserMenu() {
@@ -38,14 +48,17 @@ export function UserMenu() {
     setBusy(false);
   };
 
+  const roleMeta = user.role ? ROLE_BADGE_META[user.role as Role] : null;
+  const Icon = roleMeta?.icon ?? UserCircle2;
+
   return (
     <div className="flex items-center gap-2">
       <div className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900/60 px-2.5 py-1.5">
-        <UserCircle2 className={cn("h-4 w-4", user.role === "ADMIN" ? "text-amber-400" : "text-emerald-400")} />
+        <Icon className={cn("h-4 w-4", roleMeta?.className ? "text-current" : "text-emerald-400", roleBadgeColor(user.role))} />
         <div className="min-w-0 leading-tight">
           <div className="text-xs font-medium text-slate-100 truncate max-w-[120px]">{user.displayName}</div>
           <div className="text-[10px] text-slate-500 font-mono">
-            {user.role === "ADMIN" ? "admin" : user.branch?.code}
+            {user.branch?.code ?? roleMeta?.label.toLowerCase().replace(/\s/g, "-")}
           </div>
         </div>
       </div>
@@ -64,13 +77,22 @@ export function UserMenu() {
   );
 }
 
-/** Notifications bell with a popover of recent live events. */
+function roleBadgeColor(role: string | undefined): string {
+  if (!role) return "";
+  const m = ROLE_BADGE_META[role as Role];
+  return m ? m.className.split(" ").filter((c) => c.startsWith("text-")).join(" ") : "";
+}
+
+/** Notifications bell with a popover of recent live events.
+ *  Only branch-attached users (USER / BRANCH_ADMIN) get per-branch delivery
+ *  events; everyone else has no live notifications to show. */
 export function NotificationsBell() {
   const { notifications, clearNotifications, dismissNotification, user } = useAuth();
   const [open, setOpen] = useState(false);
 
-  // Only show the bell to branch users (admins observe but don't get per-branch delivery events).
-  if (!user || user.role !== "USER") return null;
+  if (!user) return null;
+  const isBranchUser = user.role === "USER" || user.role === "BRANCH_ADMIN";
+  if (!isBranchUser) return null;
   const count = notifications.length;
 
   return (
@@ -134,7 +156,11 @@ function NotificationRow({ n, onDismiss }: { n: LiveNotification; onDismiss: () 
 export function ConnectedClientsPanel() {
   const { onlineClients, connected, user } = useAuth();
 
-  if (!user || user.role !== "USER" || !user.branch) {
+  if (!user) return null;
+  const isBranchUser = user.role === "USER" || user.role === "BRANCH_ADMIN";
+  const isPrivileged = hasMinRole(user.role, "SECURITY_ADMIN");
+
+  if (!isBranchUser || !user.branch) {
     return (
       <Panel className="p-4">
         <div className="flex items-center gap-2 mb-2">
@@ -142,8 +168,8 @@ export function ConnectedClientsPanel() {
           <span className="text-sm font-semibold text-slate-200">Connected Clients</span>
         </div>
         <p className="text-xs text-slate-500">
-          {user?.role === "ADMIN"
-            ? "Admins observe the network. Sign in as a department user to join as a connected client."
+          {isPrivileged
+            ? `${ROLE_BADGE_META[user.role as Role]?.label ?? "Administrator"}s observe the network. Sign in as a department user to join as a connected client.`
             : "Sign in to connect as a branch client and see who else is online."}
         </p>
       </Panel>
@@ -201,3 +227,4 @@ export function ConnectedClientsPanel() {
     </Panel>
   );
 }
+

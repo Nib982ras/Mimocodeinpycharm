@@ -1,16 +1,16 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireUser, authErrorResponse } from "@/lib/auth";
+import { requireUser, authErrorResponse, ROLE_RANK } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 /** GET /api/dashboard — aggregate statistics for the dashboard.
- *  Admins see the whole network; regular users see stats scoped to their branch.
+ *  SECURITY_ADMIN+ sees the whole network; other roles see stats scoped to their branch.
  */
 export async function GET() {
   try {
     const session = await requireUser();
-    const isAdmin = session.role === "ADMIN";
+    const isAdmin = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
     const branchId = session.branchId;
 
     // Scope queries for non-admins to their own branch.

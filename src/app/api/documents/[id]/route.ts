@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { requireUser, authErrorResponse } from "@/lib/auth";
+import { requireUser, authErrorResponse, ROLE_RANK } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
 /** GET /api/documents/[id] — full metadata for a single secure package.
- *  Users can only view docs involving their own branch; admins can view any.
+ *  Users can only view docs involving their own branch; SECURITY_ADMIN+/OWNER can view any.
  */
 export async function GET(
   _req: Request,
@@ -27,7 +27,8 @@ export async function GET(
     if (!doc) {
       return NextResponse.json({ ok: false, error: "Document not found" }, { status: 404 });
     }
-    if (session.role !== "ADMIN" && doc.senderBranchId !== session.branchId && doc.recipientBranchId !== session.branchId) {
+    const isAdmin = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
+    if (!isAdmin && doc.senderBranchId !== session.branchId && doc.recipientBranchId !== session.branchId) {
       return NextResponse.json({ ok: false, error: "Not authorized to view this document" }, { status: 403 });
     }
 

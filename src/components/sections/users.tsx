@@ -7,9 +7,14 @@ import {
   Trash2,
   KeyRound,
   ShieldCheck,
+  ShieldAlert,
   Loader2,
-  Building2,
   Search,
+  Ban,
+  PlayCircle,
+  Crown,
+  UserCog,
+  Eye,
 } from "lucide-react";
 import { Panel, PanelHeader, Badge, EmptyState } from "./shared";
 import { Button } from "@/components/ui/button";
@@ -34,18 +39,40 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/components/auth-provider";
+import { api } from "@/lib/api";
+import { roleRank, type Role, type UserStatus } from "@/lib/types";
 import { BRANCH_TYPE_META, formatRelativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
+
+const ALL_ROLES: Role[] = ["OWNER", "SECURITY_ADMIN", "BRANCH_ADMIN", "USER", "READONLY"];
+
+const ROLE_META: Record<Role, { label: string; color: string; icon: typeof Crown }> = {
+  OWNER: { label: "Owner", color: "border-amber-500/40 bg-amber-500/10 text-amber-300", icon: Crown },
+  SECURITY_ADMIN: { label: "Sec Admin", color: "border-rose-500/40 bg-rose-500/10 text-rose-300", icon: ShieldCheck },
+  BRANCH_ADMIN: { label: "Branch Admin", color: "border-violet-500/40 bg-violet-500/10 text-violet-300", icon: UserCog },
+  USER: { label: "User", color: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", icon: Users },
+  READONLY: { label: "Read-only", color: "border-slate-600 bg-slate-700/30 text-slate-300", icon: Eye },
+};
+
+const STATUS_META: Record<UserStatus, { color: string; dot: string; label: string }> = {
+  ACTIVE: { color: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", dot: "bg-emerald-400", label: "Active" },
+  SUSPENDED: { color: "border-amber-500/40 bg-amber-500/10 text-amber-300", dot: "bg-amber-400", label: "Suspended" },
+  REVOKED: { color: "border-rose-500/40 bg-rose-500/10 text-rose-300", dot: "bg-rose-400", label: "Revoked" },
+};
 
 interface ManagedUser {
   id: string;
   username: string;
   displayName: string;
-  role: string;
+  role: Role;
+  status: UserStatus;
   branchId: string | null;
   branch: { id: string; code: string; name: string; type: string } | null;
+  twoFactorEnabled: boolean;
+  twoFactorEnforced: boolean;
   createdAt: string;
 }
 
@@ -65,21 +92,12 @@ export function UsersSection() {
   const [addOpen, setAddOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ManagedUser | null>(null);
   const [pwTarget, setPwTarget] = useState<ManagedUser | null>(null);
+  const [suspendTarget, setSuspendTarget] = useState<ManagedUser | null>(null);
   const { toast } = useToast();
 
   const load = useCallback(async () => {
     try {
-      const [uRes, bRes] = await Promise.all([
-        fetch("/api/users", { credentials: "include" }),
-        fetch("/api/branches", { credentials: "include" }),
-      ]);
-      // A 401 on either endpoint signals an expired session → flip to login.
-      if (uRes.status === 401 || bRes.status === 401) {
-        window.dispatchEvent(new CustomEvent("auth:unauthorized"));
-        return;
-      }
-      const u = await uRes.json().catch(() => ({}));
-      const b = await bRes.json().catch(() => ({}));
+      const [u, b] = await Promise.all([api.usersRaw(), api.branches()]);
       if (u.ok) setUsers(u.users);
       if (b.ok) setBranches(b.branches.map((x: BranchLite & { type: string }) => ({ id: x.id, code: x.code, name: x.name, type: x.type })));
     } catch {
@@ -103,15 +121,16 @@ export function UsersSection() {
     );
   });
 
-  const adminCount = users.filter((u) => u.role === "ADMIN").length;
-  const userCount = users.length - adminCount;
+  const activeCount = users.filter((u) => u.status === "ACTIVE").length;
+  const suspendedCount = users.filter((u) => u.status === "SUSPENDED").length;
+  const twoFaCount = users.filter((u) => u.twoFactorEnabled).length;
 
   return (
     <div className="space-y-5">
       <Panel>
         <PanelHeader
           title="User Accounts"
-          subtitle={`${users.length} accounts · ${adminCount} admin · ${userCount} department users`}
+          subtitle={`${users.length} accounts · ${activeCount} active · ${suspendedCount} suspended · ${twoFaCount} with 2FA`}
           icon={<Users className="h-4 w-4" />}
           action={
             <Button size="sm" onClick={() => setAddOpen(true)} className="bg-emerald-600 hover:bg-emerald-500 text-white">
@@ -146,6 +165,8 @@ export function UsersSection() {
                   <tr className="text-[11px] text-slate-500 uppercase tracking-wide border-b border-slate-800">
                     <th className="text-left font-medium px-3 py-2">User</th>
                     <th className="text-left font-medium px-3 py-2">Role</th>
+                    <th className="text-left font-medium px-3 py-2">Status</th>
+                    <th className="text-left font-medium px-3 py-2">2FA</th>
                     <th className="text-left font-medium px-3 py-2 hidden md:table-cell">Branch</th>
                     <th className="text-left font-medium px-3 py-2 hidden sm:table-cell">Created</th>
                     <th className="text-right font-medium px-3 py-2">Actions</th>
@@ -154,12 +175,17 @@ export function UsersSection() {
                 <tbody className="divide-y divide-slate-800/70">
                   {filtered.map((u) => {
                     const meta = u.branch ? BRANCH_TYPE_META[u.branch.type as keyof typeof BRANCH_TYPE_META] ?? BRANCH_TYPE_META.DEPARTMENT : null;
+                    const roleMeta = ROLE_META[u.role] ?? ROLE_META.USER;
+                    const statusMeta = STATUS_META[u.status] ?? STATUS_META.ACTIVE;
                     const isMe = u.id === me?.id;
+                    const isOwner = u.role === "OWNER";
+                    const Icon = roleMeta.icon;
+                    const canSuspend = !isOwner && !isMe && roleRank(me?.role) > roleRank(u.role);
                     return (
                       <tr key={u.id} className="hover:bg-slate-800/30">
                         <td className="px-3 py-2.5">
                           <div className="flex items-center gap-2">
-                            <div className={cn("flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold", u.role === "ADMIN" ? "bg-amber-500/20 text-amber-300" : "bg-emerald-500/20 text-emerald-300")}>
+                            <div className={cn("flex h-8 w-8 items-center justify-center rounded-full text-xs font-bold", roleMeta.color)}>
                               {u.displayName.charAt(0).toUpperCase()}
                             </div>
                             <div className="min-w-0">
@@ -172,10 +198,46 @@ export function UsersSection() {
                           </div>
                         </td>
                         <td className="px-3 py-2.5">
-                          <Badge className={u.role === "ADMIN" ? "border-amber-500/40 bg-amber-500/10 text-amber-300" : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"}>
-                            {u.role === "ADMIN" ? <ShieldCheck className="h-3 w-3" /> : <Building2 className="h-3 w-3" />}
-                            {u.role}
+                          <Badge className={cn("border", roleMeta.color)}>
+                            <Icon className="h-3 w-3" />
+                            {roleMeta.label}
                           </Badge>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <Badge className={cn("border", statusMeta.color)}>
+                            <span className={cn("h-1.5 w-1.5 rounded-full", statusMeta.dot)} />
+                            {statusMeta.label}
+                          </Badge>
+                        </td>
+                        <td className="px-3 py-2.5">
+                          {u.twoFactorEnabled ? (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="inline-flex items-center justify-center h-7 w-7 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-400">
+                                    <ShieldCheck className="h-3.5 w-3.5" />
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent className="bg-slate-900 border-slate-700 text-slate-200">
+                                  2FA enabled{u.twoFactorEnforced && " · enforced"}
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          ) : (
+                            <TooltipProvider>
+                              <Tooltip>
+                                <TooltipTrigger asChild>
+                                  <span className="inline-flex items-center justify-center h-7 w-7 rounded-md border border-slate-700 bg-slate-800/40 text-slate-500">
+                                    <ShieldAlert className="h-3.5 w-3.5" />
+                                  </span>
+                                </TooltipTrigger>
+                                <TooltipContent className="bg-slate-900 border-slate-700 text-slate-200">
+                                  2FA not enabled
+                                  {u.twoFactorEnforced && " · enforced (pending enrollment)"}
+                                </TooltipContent>
+                              </Tooltip>
+                            </TooltipProvider>
+                          )}
                         </td>
                         <td className="px-3 py-2.5 hidden md:table-cell">
                           {u.branch ? (
@@ -193,22 +255,57 @@ export function UsersSection() {
                         </td>
                         <td className="px-3 py-2.5">
                           <div className="flex items-center justify-end gap-1">
+                            {/* Suspend / Reactivate */}
+                            {canSuspend && (
+                              u.status === "ACTIVE" ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => setSuspendTarget(u)}
+                                  className="text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 h-8 w-8 p-0"
+                                  title="Suspend user"
+                                >
+                                  <Ban className="h-4 w-4" />
+                                </Button>
+                              ) : u.status === "SUSPENDED" ? (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={async () => {
+                                    try {
+                                      await api.suspendUser(u.id, false);
+                                      toast({ title: "User reactivated", description: `${u.username} may now sign in again.` });
+                                      await load();
+                                    } catch (e) {
+                                      toast({ title: "Failed to reactivate", description: e instanceof Error ? e.message : "Error", variant: "destructive" });
+                                    }
+                                  }}
+                                  className="text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 h-8 w-8 p-0"
+                                  title="Reactivate user"
+                                >
+                                  <PlayCircle className="h-4 w-4" />
+                                </Button>
+                              ) : null
+                            )}
+                            {/* Reset password */}
                             <Button
                               variant="ghost"
                               size="sm"
                               onClick={() => setPwTarget(u)}
-                              className="text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 h-8 w-8 p-0"
-                              title="Reset password"
+                              disabled={isOwner}
+                              className="text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 h-8 w-8 p-0 disabled:opacity-30"
+                              title={isOwner ? "Owner manages their own password" : "Reset password"}
                             >
                               <KeyRound className="h-4 w-4" />
                             </Button>
+                            {/* Delete */}
                             <Button
                               variant="ghost"
                               size="sm"
                               onClick={() => setDeleteTarget(u)}
-                              disabled={isMe}
+                              disabled={isMe || isOwner}
                               className="text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 h-8 w-8 p-0 disabled:opacity-30"
-                              title={isMe ? "You cannot delete yourself" : "Delete user"}
+                              title={isMe ? "You cannot delete yourself" : isOwner ? "Owner accounts cannot be deleted" : "Delete user"}
                             >
                               <Trash2 className="h-4 w-4" />
                             </Button>
@@ -227,6 +324,7 @@ export function UsersSection() {
       <AddUserDialog open={addOpen} onOpenChange={setAddOpen} branches={branches} onCreated={load} toast={toast} />
       <DeleteUserDialog target={deleteTarget} onClose={() => setDeleteTarget(null)} onDone={load} toast={toast} meId={me?.id} />
       <ResetPasswordDialog target={pwTarget} onClose={() => setPwTarget(null)} toast={toast} />
+      <SuspendUserDialog target={suspendTarget} onClose={() => setSuspendTarget(null)} onDone={load} toast={toast} />
     </div>
   );
 }
@@ -247,7 +345,7 @@ function AddUserDialog({
   const [username, setUsername] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"USER" | "ADMIN">("USER");
+  const [role, setRole] = useState<Role>("USER");
   const [branchId, setBranchId] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -255,30 +353,30 @@ function AddUserDialog({
     setUsername(""); setDisplayName(""); setPassword(""); setRole("USER"); setBranchId("");
   };
 
+  const branchRequired = role === "BRANCH_ADMIN" || role === "USER" || role === "READONLY";
+
   const handleSave = async () => {
     if (!username || !password) {
       toast({ title: "Missing fields", description: "Username and password are required.", variant: "destructive" });
       return;
     }
-    if (role === "USER" && !branchId) {
-      toast({ title: "Branch required", description: "Department users must be assigned to a branch.", variant: "destructive" });
+    if (role === "OWNER") {
+      toast({ title: "Cannot create owner", description: "The Owner role cannot be created.", variant: "destructive" });
+      return;
+    }
+    if (branchRequired && !branchId) {
+      toast({ title: "Branch required", description: `${ROLE_META[role].label} accounts must be assigned to a branch.`, variant: "destructive" });
       return;
     }
     setSaving(true);
     try {
-      const res = await fetch("/api/users", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, displayName, password, role, branchId: role === "USER" ? branchId : null }),
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
-        throw new Error(data.error || "Failed to create user");
+      const res = await api.createUserRaw({ username, displayName, password, role, branchId: branchRequired ? branchId : null });
+      if (!res.ok) {
+        throw new Error(res.error || "Failed to create user");
       }
       toast({
         title: "User created",
-        description: `${username} can now sign in${role === "USER" ? ` as their branch.` : " as an administrator."}`,
+        description: `${username} can now sign in as ${ROLE_META[role].label}.`,
       });
       reset();
       onOpenChange(false);
@@ -298,7 +396,7 @@ function AddUserDialog({
             <UserPlus className="h-5 w-5 text-emerald-400" /> Create User Account
           </DialogTitle>
           <DialogDescription className="text-slate-400">
-            Provision a new login for a department PC/tablet or an administrator.
+            Provision a new login. Owner is excluded — there can only be one.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3 py-2">
@@ -319,15 +417,34 @@ function AddUserDialog({
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <Label className="text-slate-300 text-xs">Role</Label>
-              <Select value={role} onValueChange={(v) => setRole(v as "USER" | "ADMIN")}>
+              <Select value={role} onValueChange={(v) => setRole(v as Role)}>
                 <SelectTrigger className="bg-slate-950/60 border-slate-700 text-slate-100"><SelectValue /></SelectTrigger>
                 <SelectContent className="bg-slate-900 border-slate-700">
-                  <SelectItem value="USER" className="text-slate-100 focus:bg-slate-800">Department user</SelectItem>
-                  <SelectItem value="ADMIN" className="text-slate-100 focus:bg-slate-800">Administrator</SelectItem>
+                  {ALL_ROLES.map((r) => {
+                    const m = ROLE_META[r];
+                    const Icon = m.icon;
+                    return (
+                      <SelectItem
+                        key={r}
+                        value={r}
+                        disabled={r === "OWNER"}
+                        className="text-slate-100 focus:bg-slate-800 data-[disabled]:opacity-50 data-[disabled]:pointer-events-none"
+                      >
+                        <span className="inline-flex items-center gap-2">
+                          <Icon className="h-3 w-3" />
+                          {m.label}
+                          {r === "OWNER" && <span className="text-[10px] text-slate-500">(cannot create)</span>}
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
                 </SelectContent>
               </Select>
+              {role === "OWNER" && (
+                <p className="text-[10px] text-amber-400">Owner role cannot be created.</p>
+              )}
             </div>
-            {role === "USER" && (
+            {branchRequired && (
               <div className="space-y-1.5">
                 <Label className="text-slate-300 text-xs">Branch</Label>
                 <Select value={branchId} onValueChange={setBranchId}>
@@ -374,9 +491,8 @@ function DeleteUserDialog({
     if (!target) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/users/${target.id}`, { method: "DELETE", credentials: "include" });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to delete");
+      const res = await api.deleteUserRaw(target.id);
+      if (!res.ok) throw new Error(res.error || "Failed to delete");
       toast({ title: "User deleted", description: `${target.username} has been removed.` });
       onClose();
       await onDone();
@@ -428,14 +544,8 @@ function ResetPasswordDialog({
     if (!target || !password) return;
     setBusy(true);
     try {
-      const res = await fetch(`/api/users/${target.id}/password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-        credentials: "include",
-      });
-      const data = await res.json();
-      if (!res.ok || !data.ok) throw new Error(data.error || "Failed to reset");
+      const res = await api.resetPasswordRaw(target.id, password);
+      if (!res.ok) throw new Error(res.error || "Failed to reset");
       toast({ title: "Password reset", description: `${target.username} can now sign in with the new password.` });
       setPassword("");
       onClose();
@@ -465,6 +575,75 @@ function ResetPasswordDialog({
           <Button onClick={handleReset} disabled={busy || !password} className="bg-amber-600 hover:bg-amber-500 text-white">
             {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <KeyRound className="h-4 w-4" />}
             Reset Password
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function SuspendUserDialog({
+  target,
+  onClose,
+  onDone,
+  toast,
+}: {
+  target: ManagedUser | null;
+  onClose: () => void;
+  onDone: () => void;
+  toast: ReturnType<typeof useToast>["toast"];
+}) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const handleSuspend = async () => {
+    if (!target) return;
+    setBusy(true);
+    try {
+      await api.suspendUser(target.id, true, reason || undefined);
+      toast({
+        title: "User suspended",
+        description: `${target.username}'s sessions were revoked. They cannot sign in until reactivated.`,
+        variant: "destructive",
+      });
+      setReason("");
+      onClose();
+      await onDone();
+    } catch (e) {
+      toast({ title: "Failed to suspend user", description: e instanceof Error ? e.message : "Error", variant: "destructive" });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={!!target} onOpenChange={(o) => { if (!o) { setReason(""); onClose(); } }}>
+      <DialogContent className="bg-slate-900 border-slate-700 text-slate-100 max-w-md">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-slate-100">
+            <Ban className="h-5 w-5 text-amber-400" /> Suspend User
+          </DialogTitle>
+          <DialogDescription className="text-slate-400">
+            {target && (
+              <>
+                <span className="font-mono text-emerald-400">@{target.username}</span> will be marked SUSPENDED
+                and all their active sessions revoked. They cannot sign in until you reactivate them.
+              </>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-1.5 py-2">
+          <Label className="text-slate-300 text-xs">Reason (optional)</Label>
+          <Input
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. Pending security review"
+            className="bg-slate-950/60 border-slate-700 text-slate-100"
+          />
+        </div>
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose} className="text-slate-300 hover:bg-slate-800">Cancel</Button>
+          <Button onClick={handleSuspend} disabled={busy} className="bg-amber-600 hover:bg-amber-500 text-white">
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Ban className="h-4 w-4" />}
+            Suspend User
           </Button>
         </DialogFooter>
       </DialogContent>

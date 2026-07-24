@@ -4,14 +4,14 @@ import { encryptDocument, decryptPrivateKey } from "@/lib/crypto";
 import { storeCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
-import { requireUser, authErrorResponse } from "@/lib/auth";
+import { requireUser, requireSystemActive, authErrorResponse, ROLE_RANK } from "@/lib/auth";
 import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 
 /** GET /api/documents — list documents visible to the current user.
- *  - USER: only documents sent by / received by their branch
- *  - ADMIN: all documents (optionally filtered by branchId/direction)
+ *  - USER/READONLY/BRANCH_ADMIN: only documents sent by / received by their branch
+ *  - SECURITY_ADMIN+/OWNER: all documents (optionally filtered by branchId/direction)
  */
 export async function GET(req: Request) {
   try {
@@ -20,9 +20,10 @@ export async function GET(req: Request) {
     const branchId = url.searchParams.get("branchId");
     const direction = url.searchParams.get("direction"); // "sent" | "received"
 
+    const isAdmin = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
     const where: Record<string, unknown> = {};
-    if (session.role === "ADMIN") {
-      // Admin can view everything; optional filter.
+    if (isAdmin) {
+      // Security admin / owner can view everything; optional filter.
       if (branchId && direction === "sent") where.senderBranchId = branchId;
       else if (branchId && direction === "received") where.recipientBranchId = branchId;
       else if (branchId) {
@@ -77,12 +78,22 @@ export async function GET(req: Request) {
 }
 
 /** POST /api/documents — encrypt and store a document for a recipient.
- *  - USER: sender is forced to the user's branch (the form's senderBranchId is ignored).
- *  - ADMIN: may pick any sender branch (must have an active signing key).
+ *  - READONLY: rejected outright (403).
+ *  - USER/BRANCH_ADMIN: sender is forced to the user's branch (the form's senderBranchId is ignored).
+ *  - SECURITY_ADMIN+/OWNER: may pick any sender branch (must have an active signing key).
+ *  Enforces system-active + lockdown rules via requireSystemActive() (owner bypasses).
  */
 export async function POST(req: Request) {
   try {
-    const session = await requireUser();
+    const session = await requireSystemActive();
+
+    if (session.role === "READONLY") {
+      return NextResponse.json(
+        { ok: false, error: "Read-only users cannot send documents" },
+        { status: 403 }
+      );
+    }
+
     const formData = await req.formData();
     const file = formData.get("file") as File | null;
     const formSenderBranchId = formData.get("senderBranchId") as string | null;
@@ -95,9 +106,10 @@ export async function POST(req: Request) {
       );
     }
 
-    // Enforce sender identity: regular users always send as their own branch.
-    const senderBranchId =
-      session.role === "ADMIN" ? (formSenderBranchId ?? null) : session.branchId;
+    // Enforce sender identity: regular users always send as their own branch;
+    // SECURITY_ADMIN+/OWNER may pick any sender branch.
+    const canPickSender = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
+    const senderBranchId = canPickSender ? (formSenderBranchId ?? null) : session.branchId;
     if (!senderBranchId) {
       return NextResponse.json(
         { ok: false, error: "No sender branch available for this account" },
