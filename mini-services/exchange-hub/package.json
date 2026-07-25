@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun --hot index.ts"
+    "dev": "node --watch index.ts",
+    "start": "node index.ts"
   },
   "dependencies": {
     "socket.io": "^4.8.3"

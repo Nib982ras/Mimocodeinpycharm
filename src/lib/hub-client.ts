@@ -31,7 +31,7 @@ function getSocket(): Socket | null {
       reconnection: true,
       reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
-      timeout: 3000,
+      timeout: 5000,
       autoConnect: true,
     });
     _socket.on("connect", () => {
@@ -41,7 +41,8 @@ function getSocket(): Socket | null {
       console.warn("[hub-client] connection error:", err.message);
     });
     return _socket;
-  } catch {
+  } catch (err) {
+    console.error("[hub-client] socket creation error:", err);
     return null;
   }
 }
@@ -82,10 +83,9 @@ export function hubNotify(evt: {
   const sock = getSocket();
   if (!sock) return;
   if (!sock.connected) {
-    // Buffer briefly: try to emit on next tick (best-effort).
-    sock.once("connect", () =>
-      sock.emit("server:notify", { token: SERVER_TOKEN, event: evt })
-    );
+    // Replace any pending connect listener — avoid unbounded accumulation.
+    sock.off("connect");
+    sock.once("connect", () => sock.emit("server:notify", { token: SERVER_TOKEN, event: evt }));
     return;
   }
   sock.emit("server:notify", { token: SERVER_TOKEN, event: evt });

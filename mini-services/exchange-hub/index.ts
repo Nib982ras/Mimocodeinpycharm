@@ -1,6 +1,6 @@
 import { createServer } from "http";
 import { Server, type Socket } from "socket.io";
-import { validateServerToken } from "./auth";
+import { validateServerToken } from "./auth.js";
 
 /**
  * Exchange Hub — real-time presence & event broker for the Secure Multi-Branch
