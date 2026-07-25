@@ -16,7 +16,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -47,6 +47,7 @@ model Branch {
   auditLogs   AuditLog[]
   users       User[]
   messages    Message[]
+  documentPermissions DocumentPermission[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -68,11 +69,13 @@ model User {
   suspendedAt     DateTime?
   suspendedBy     String?
   twoFactor       TwoFactor?
+  webauthnCredentials WebAuthnCredential[]
   sessions        Session[]
   devices         Device[]
   auditLogs       AuditLog[] @relation("ActorAuditLogs")
   messagesSent    Message[] @relation("MessagesSent")
   messagesReceived Message[] @relation("MessagesReceived")
+  documentPermissions DocumentPermission[]
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
@@ -95,6 +98,26 @@ model TwoFactor {
   enrolledAt      DateTime?
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+}
+
+// WebAuthn/FIDO2 credentials for passwordless authentication.
+// Each credential is bound to a specific authenticator (device).
+model WebAuthnCredential {
+  id                String   @id @default(cuid())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credentialId      String   @unique // base64url-encoded credential ID
+  publicKey         String   // base64url-encoded public key
+  counter           BigInt   @default(0) // signature counter for clone detection
+  transports        String?  // JSON array of supported transports ["internal", "usb", "ble", "nfc"]
+  authenticatorType String?  // "platform" or "cross-platform"
+  deviceName        String?  // user-provided name for the device
+  createdAt         DateTime @default(now())
+  lastUsedAt        DateTime?
+  revokedAt         DateTime?
+
+  @@index([userId])
+  @@index([credentialId])
 }
 
 // Short-lived session tokens (in addition to the cookie JWT) for revocation.
@@ -217,9 +240,12 @@ model Document {
   nonce              String
   packageVersion     String   @default("1.0")
   status             String   @default("DELIVERED") // DELIVERED | DECRYPTED | FAILED | PURGED
+  visibility         String   @default("branch")   // branch | restricted | shared
   createdAt          DateTime @default(now())
   decryptedAt        DateTime?
+  expiresAt          DateTime? // optional document expiry
   auditLogs          AuditLog[]
+  permissions        DocumentPermission[]
 
   @@index([senderBranchId])
   @@index([recipientBranchId])
@@ -227,6 +253,32 @@ model Document {
   @@index([senderBranchId, createdAt])     // Sent docs listing per branch
   @@index([recipientBranchId, createdAt])  // Received docs listing per branch
   @@index([status, createdAt])             // Status-filtered queries
+  @@index([visibility])                    // Filter by visibility
+  @@index([expiresAt])                     // Expiry cleanup queries
+}
+
+// Granular per-document permissions.
+// Allows sharing documents with specific users beyond the sender/recipient branches.
+// Permissions are additive: a user with any matching permission can access the document.
+model DocumentPermission {
+  id          String   @id @default(cuid())
+  documentId  String
+  document    Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  userId      String?  // null = role-based or branch-based permission
+  user        User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  branchId    String?  // null = user-specific permission
+  branch      Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  permission  String   // VIEW | DOWNLOAD | DECRYPT | ADMIN
+  grantedBy   String   // username who granted this permission
+  grantedAt   DateTime @default(now())
+  expiresAt   DateTime? // optional: permission auto-revokes after this time
+  revokedAt   DateTime?
+
+  @@unique([documentId, userId, branchId]) // prevent duplicate grants
+  @@index([documentId])
+  @@index([userId])
+  @@index([branchId])
+  @@index([expiresAt])
 }
 
 // Immutable audit trail. Each row is append-only; no UPDATE path is used.

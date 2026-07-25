@@ -66,7 +66,21 @@ export function KeysSection() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const res = await api.keys();
+        if (isMounted) setKeys(res.keys);
+      } catch {
+        // 401 → auth:unauthorized event flips to login; other errors keep state.
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   const confirmRotate = async () => {
     if (!rotateTarget) return;

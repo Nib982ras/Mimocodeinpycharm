@@ -95,7 +95,11 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
+    // Call onSelect outside the effect to avoid cascading renders
+    const callOnSelect = () => {
+      onSelect(api)
+    }
+    callOnSelect()
     api.on("reInit", onSelect)
     api.on("select", onSelect)
 

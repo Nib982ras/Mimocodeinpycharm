@@ -57,8 +57,26 @@ export function DashboardSection({ onNavigate }: Props) {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const [d, s] = await Promise.all([
+          api.dashboard().catch(() => null),
+          api.systemState().catch(() => null),
+        ]);
+        if (isMounted) {
+          if (d) setData(d);
+          if (s) setSys(s);
+        }
+      } catch {
+        /* 401 handled centrally */
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   if (loading || !data) {
     return (

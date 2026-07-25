@@ -10,10 +10,14 @@ import { io, type Socket } from "socket.io-client";
  * localhost). Branch *clients* (browsers) connect via Caddy with
  * `io("/?XTransformPort=3003")`.
  *
+ * SECURITY: All server:notify events include an authentication token.
+ * The hub validates this token before processing any events.
+ *
  * The connection is created lazily and reused across requests.
  */
 
-const HUB_URL = "http://localhost:3003";
+const HUB_URL = process.env.HUB_URL || "http://localhost:3003";
+const SERVER_TOKEN = process.env.HUB_SERVER_TOKEN || "";
 
 let _socket: Socket | null = null;
 
@@ -33,8 +37,8 @@ function getSocket(): Socket | null {
     _socket.on("connect", () => {
       // server client — no client:join needed
     });
-    _socket.on("connect_error", () => {
-      // Hub may be down; silently degrade. Real-time is best-effort.
+    _socket.on("connect_error", (err) => {
+      console.warn("[hub-client] connection error:", err.message);
     });
     return _socket;
   } catch {
@@ -50,20 +54,39 @@ export interface NotifyDocument {
   size: number;
 }
 
+export interface NotifyMessage {
+  id: string;
+  fromUserId: string;
+  fromUser: { username: string; displayName: string };
+  toUserId?: string;
+  branchId: string;
+  branchCode: string;
+  text: string;
+  createdAt: string;
+}
+
 /** Forward a server-side event to the hub (best-effort, non-blocking). */
 export function hubNotify(evt: {
-  type: "document:delivered" | "document:decrypted" | "branch:created";
+  type: "document:delivered" | "document:decrypted" | "branch:created" | "message:send";
   recipientBranchId?: string;
   senderBranchId?: string;
   branch?: { id: string; code: string; name: string; type: string };
   document?: NotifyDocument;
+  message?: NotifyMessage;
 }): void {
+  if (!SERVER_TOKEN) {
+    console.warn("[hub-client] HUB_SERVER_TOKEN not configured, skipping notification");
+    return;
+  }
+
   const sock = getSocket();
   if (!sock) return;
   if (!sock.connected) {
     // Buffer briefly: try to emit on next tick (best-effort).
-    sock.once("connect", () => sock.emit("server:notify", evt));
+    sock.once("connect", () =>
+      sock.emit("server:notify", { token: SERVER_TOKEN, event: evt })
+    );
     return;
   }
-  sock.emit("server:notify", evt);
+  sock.emit("server:notify", { token: SERVER_TOKEN, event: evt });
 }

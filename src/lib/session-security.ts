@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { db } from "@/lib/db";
+import { getRedis, redisSet, redisDel, redisKeys } from "@/lib/redis";
 
 /**
  * Session security utilities.
@@ -9,6 +10,10 @@ import { db } from "@/lib/db";
  *   - Concurrent session limits per user
  *   - Session rotation on privilege escalation
  *   - Stale session cleanup
+ *
+ * When Redis is available:
+ *   - Fast concurrent session checks via Redis sets
+ *   - Automatic session expiration via TTL
  */
 
 // ---------- Configuration ----------
@@ -95,6 +100,9 @@ function normalizeUserAgent(ua: string): string {
 
 // ---------- Concurrent session management ----------
 
+// Redis key prefix for sessions
+const REDIS_SESSION_PREFIX = "session:";
+
 /**
  * Enforce maximum concurrent sessions per user.
  * Revokes the oldest sessions when the limit is exceeded.
@@ -123,6 +131,14 @@ export async function checkConcurrentSessions(userId: string): Promise<void> {
           revokedAt: new Date(),
         },
       });
+
+      // Also clean up Redis session cache
+      const redis = getRedis();
+      if (redis) {
+        for (const session of sessionsToRevoke) {
+          await redisDel(`${REDIS_SESSION_PREFIX}${session.tokenJti}`);
+        }
+      }
     }
   } catch (err) {
     console.error("[session-security] Failed to check concurrent sessions:", err);
@@ -146,6 +162,12 @@ export async function revokeAllUserSessions(
       where.tokenJti = { not: exceptJti };
     }
 
+    // Get sessions before revoking (for Redis cleanup)
+    const sessions = await db.session.findMany({
+      where,
+      select: { tokenJti: true },
+    });
+
     const result = await db.session.updateMany({
       where,
       data: {
@@ -153,6 +175,14 @@ export async function revokeAllUserSessions(
         revokedAt: new Date(),
       },
     });
+
+    // Clean up Redis session cache
+    const redis = getRedis();
+    if (redis) {
+      for (const session of sessions) {
+        await redisDel(`${REDIS_SESSION_PREFIX}${session.tokenJti}`);
+      }
+    }
 
     return result.count;
   } catch (err) {
@@ -202,6 +232,59 @@ export async function cleanupStaleSessions(): Promise<number> {
 }
 
 // ---------- Session validation helpers ----------
+
+/**
+ * Cache session data in Redis for fast lookups.
+ * TTL is set to 24 hours by default.
+ */
+export async function cacheSession(
+  tokenJti: string,
+  sessionData: {
+    userId: string;
+    ipAddress?: string;
+    userAgent?: string;
+    fingerprint?: string;
+  },
+  ttlSeconds: number = 24 * 60 * 60
+): Promise<void> {
+  const redis = getRedis();
+  if (!redis) return;
+
+  try {
+    await redisSet(`${REDIS_SESSION_PREFIX}${tokenJti}`, sessionData, ttlSeconds);
+  } catch (err) {
+    console.error("[session-security] Failed to cache session:", err);
+  }
+}
+
+/**
+ * Get cached session data from Redis.
+ */
+export async function getCachedSession(
+  tokenJti: string
+): Promise<{
+  userId: string;
+  ipAddress?: string;
+  userAgent?: string;
+  fingerprint?: string;
+} | null> {
+  const redis = getRedis();
+  if (!redis) return null;
+
+  try {
+    const { redisGet } = await import("@/lib/redis");
+    return await redisGet(`${REDIS_SESSION_PREFIX}${tokenJti}`);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove session from Redis cache.
+ */
+export async function uncachedSession(tokenJti: string): Promise<void> {
+  await redisDel(`${REDIS_SESSION_PREFIX}${tokenJti}`);
+}
 
 /**
  * Get active session count for a user.

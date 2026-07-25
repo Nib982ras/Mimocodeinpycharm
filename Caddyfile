@@ -1,9 +1,9 @@
 :81 {
-	@transform_port_query {
-		query XTransformPort=*
-	}
+	# Whitelist of allowed ports for the transform proxy.
+	# Only ports that are actually used by this system are permitted.
+	@allowed_port query XTransformPort in 3000 3003
 
-	handle @transform_port_query {
+	handle @allowed_port {
 		reverse_proxy localhost:{query.XTransformPort} {
 			header_up Host {host}
 			header_up X-Forwarded-For {remote_host}

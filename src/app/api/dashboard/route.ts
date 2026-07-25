@@ -14,8 +14,8 @@ export async function GET() {
     const branchId = session.branchId;
 
     // Scope queries for non-admins to their own branch.
-    const docWhere = isAdmin ? {} : { OR: [{ senderBranchId: branchId! }, { recipientBranchId: branchId! }] };
-    const auditWhere = isAdmin ? {} : { branchId };
+    const docWhere = isAdmin ? {} : branchId ? { OR: [{ senderBranchId: branchId }, { recipientBranchId: branchId }] } : {};
+    const auditWhere = isAdmin ? {} : branchId ? { branchId } : {};
 
     const [
       branchCount,
@@ -32,11 +32,11 @@ export async function GET() {
     ] = await Promise.all([
       db.branch.count(),
       db.document.count({ where: docWhere }),
-      isAdmin ? db.key.count() : db.key.count({ where: { branchId: branchId! } }),
+      isAdmin ? db.key.count() : branchId ? db.key.count({ where: { branchId } }) : 0,
       db.auditLog.count({ where: auditWhere }),
-      isAdmin ? db.key.count({ where: { status: "ACTIVE" } }) : db.key.count({ where: { status: "ACTIVE", branchId: branchId! } }),
-      isAdmin ? db.key.count({ where: { status: "ROTATED" } }) : db.key.count({ where: { status: "ROTATED", branchId: branchId! } }),
-      isAdmin ? db.key.count({ where: { status: "REVOKED" } }) : db.key.count({ where: { status: "REVOKED", branchId: branchId! } }),
+      isAdmin ? db.key.count({ where: { status: "ACTIVE" } }) : branchId ? db.key.count({ where: { status: "ACTIVE", branchId } }) : 0,
+      isAdmin ? db.key.count({ where: { status: "ROTATED" } }) : branchId ? db.key.count({ where: { status: "ROTATED", branchId } }) : 0,
+      isAdmin ? db.key.count({ where: { status: "REVOKED" } }) : branchId ? db.key.count({ where: { status: "REVOKED", branchId } }) : 0,
       db.document.count({ where: { ...docWhere, status: "DECRYPTED" } }),
       db.branch.groupBy({ by: ["type"], _count: true }),
       db.auditLog.findMany({ where: auditWhere, take: 8, orderBy: { createdAt: "desc" } }),

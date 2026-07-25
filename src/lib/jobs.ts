@@ -2,9 +2,14 @@
  * Background job processing for maintenance tasks.
  *
  * Provides a simple in-process job scheduler for periodic cleanup tasks.
- * For multi-instance deployments, consider using a dedicated job queue
- * (BullMQ, pg-boss, etc.) or database-level advisory locks to prevent
- * duplicate execution across instances.
+ *
+ * When Redis is available:
+ *   - Distributed job deduplication prevents duplicate execution across instances
+ *   - Job state persists across restarts
+ *
+ * For multi-instance deployments without Redis, consider using:
+ *   - Database-level advisory locks (PostgreSQL)
+ *   - Dedicated job queue (BullMQ, pg-boss)
  *
  * Jobs are non-blocking and run in the background. Failures are logged
  * but do not affect the main request path.
@@ -112,22 +117,59 @@ export function getJobStatus(): Array<{
 
 const pendingJobs: Set<string> = new Set();
 
+// Redis key prefix for job deduplication
+const REDIS_JOB_PREFIX = "job:";
+
 /**
  * Execute a one-shot async job with deduplication.
  * If a job with the same name is already running, skip it.
+ *
+ * When Redis is available, deduplication works across multiple instances.
  *
  * @param name - Unique job name for deduplication
  * @param fn - The async function to execute
  */
 export async function runOnce(name: string, fn: () => Promise<void>): Promise<void> {
+  // Check local deduplication first (fast path)
   if (pendingJobs.has(name)) return;
+
+  // Check Redis deduplication (distributed)
+  const { getRedis, redisSetNx } = await import("@/lib/redis");
+  const redis = getRedis();
+  const redisKey = `${REDIS_JOB_PREFIX}${name}`;
+
+  if (redis) {
+    try {
+      // Try to acquire lock with 5 minute TTL
+      const acquired = await redisSetNx(redisKey, { startedAt: Date.now() }, 300);
+      if (!acquired) {
+        // Another instance is running this job
+        return;
+      }
+    } catch (err) {
+      console.error(`[jobs] Redis dedup check failed for "${name}":`, err);
+      // Fall through to local dedup
+    }
+  }
+
+  // Mark as pending locally
   pendingJobs.add(name);
+
   try {
     await fn();
   } catch (err) {
     console.error(`[jobs] One-shot job "${name}" failed:`, err);
   } finally {
     pendingJobs.delete(name);
+    // Release Redis lock
+    if (redis) {
+      try {
+        const { redisDel } = await import("@/lib/redis");
+        await redisDel(redisKey);
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
   }
 }
 
@@ -135,6 +177,8 @@ export async function runOnce(name: string, fn: () => Promise<void>): Promise<vo
 
 import { cleanupExpiredRateLimits } from "@/lib/rate-limit";
 import { cleanupStaleSessions } from "@/lib/session-security";
+import { cleanupExpiredPermissions } from "@/lib/document-permissions";
+import { cleanupExpiredDocuments } from "@/lib/document-expiry";
 
 /**
  * Register all built-in maintenance jobs.
@@ -163,6 +207,30 @@ export function registerMaintenanceJobs(): void {
       }
     },
     intervalMs: 6 * 60 * 60 * 1000, // Every 6 hours
+  });
+
+  // Clean up expired document permissions every hour
+  registerJob({
+    name: "permission-cleanup",
+    fn: async () => {
+      const removed = await cleanupExpiredPermissions();
+      if (removed > 0) {
+        console.log(`[jobs] Cleaned up ${removed} expired document permissions`);
+      }
+    },
+    intervalMs: 60 * 60 * 1000, // Every hour
+  });
+
+  // Clean up expired documents every hour
+  registerJob({
+    name: "document-expiry-cleanup",
+    fn: async () => {
+      const result = await cleanupExpiredDocuments();
+      if (result.purged > 0) {
+        console.log(`[jobs] Purged ${result.purged} expired documents`);
+      }
+    },
+    intervalMs: 60 * 60 * 1000, // Every hour
   });
 
   console.log("[jobs] Maintenance jobs registered");

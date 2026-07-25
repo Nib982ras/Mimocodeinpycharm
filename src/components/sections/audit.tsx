@@ -62,7 +62,24 @@ export function AuditSection() {
     }
   }, [filter]);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const res = await api.audit(filter ? { action: filter } : undefined);
+        if (isMounted) {
+          setLogs(res.logs);
+          setCounts(res.counts);
+        }
+      } catch {
+        // 401 → auth:unauthorized event flips to login; other errors keep state.
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, [filter]);
 
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
 

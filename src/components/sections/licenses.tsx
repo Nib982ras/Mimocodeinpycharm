@@ -77,8 +77,20 @@ export function LicensesSection() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const res = await api.licenses();
+        if (isMounted) setLicenses(res.licenses);
+      } catch {
+        // 401 handled centrally.
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   const activeCount = licenses.filter((l) => l.status === "ACTIVE").length;
 

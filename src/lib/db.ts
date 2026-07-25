@@ -1,7 +1,7 @@
 import { PrismaClient } from '@prisma/client'
 
 /**
- * Database client with connection pooling and production optimizations.
+ * PostgreSQL database client with connection pooling and production optimizations.
  *
  * Configuration:
  *   - Development: Singleton pattern to avoid connection exhaustion during HMR
@@ -21,7 +21,7 @@ const poolSize = process.env.DATABASE_POOL_SIZE
     : 1;
 
 // Configure log level
-const logLevel = process.env.DATABASE_LOG_LEVEL || 
+const logLevel = process.env.DATABASE_LOG_LEVEL ||
   (process.env.NODE_ENV === 'production' ? 'error' : 'warn');
 
 export const db =
@@ -31,16 +31,11 @@ export const db =
       { level: 'error', emit: 'event' },
       { level: 'warn', emit: 'event' },
     ],
-    // Connection pool configuration (PostgreSQL)
-    // Note: SQLite doesn't support connection pooling in the same way,
-    // but this configuration will be used when migrating to PostgreSQL
-    ...(process.env.DATABASE_URL?.includes('postgresql') && {
-      datasources: {
-        db: {
-          url: process.env.DATABASE_URL,
-        },
+    datasources: {
+      db: {
+        url: process.env.DATABASE_URL,
       },
-    }),
+    },
   })
 
 // Log query errors in production

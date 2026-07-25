@@ -54,7 +54,7 @@ export async function POST(
     if (purgeDocuments && key.receivedDocuments) {
       for (const doc of key.receivedDocuments as Array<{ id: string; storagePath: string }>) {
         try {
-          deleteCiphertext(doc.storagePath);
+          await deleteCiphertext(doc.storagePath);
           await db.document.update({
             where: { id: doc.id },
             data: { status: "PURGED" },

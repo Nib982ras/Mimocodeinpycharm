@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useLayoutEffect } from "react";
 import {
   FileLock2,
   Upload,
@@ -90,13 +90,32 @@ export function DocumentsSection() {
     }
   }, []);
 
+  // Load data on mount
   useEffect(() => {
-    load();
-  }, [load]);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const [b, d] = await Promise.all([api.branches(), api.documents()]);
+        if (isMounted) {
+          setBranches(b.branches);
+          setDocuments(d.documents);
+        }
+      } catch {
+        // A 401 triggers the auth:unauthorized event (handled by AuthProvider →
+        // login screen). Any other error just keeps the previous state.
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   // When identity changes, default the tab and prefill the sender.
-  useEffect(() => {
+  // Use useLayoutEffect for synchronous state updates when props change.
+  useLayoutEffect(() => {
     if (identity) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setTab("inbox");
       setSenderId(identity.id);
     } else {
@@ -113,8 +132,23 @@ export function DocumentsSection() {
     return () => clearInterval(t);
   }, [identity?.id]);
   useEffect(() => {
-    if (reloadTick > 0) load();
-  }, [reloadTick, load]);
+    if (reloadTick > 0) {
+      let isMounted = true;
+      const loadData = async () => {
+        try {
+          const [b, d] = await Promise.all([api.branches(), api.documents()]);
+          if (isMounted) {
+            setBranches(b.branches);
+            setDocuments(d.documents);
+          }
+        } catch {
+          // ignore errors during polling
+        }
+      };
+      loadData();
+      return () => { isMounted = false; };
+    }
+  }, [reloadTick]);
 
   // Filter documents by the active tab + client identity.
   const filteredDocs = documents.filter((d) => {

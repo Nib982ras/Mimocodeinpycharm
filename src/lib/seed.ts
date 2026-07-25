@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import { db } from "@/lib/db";
 import {
   generateEcKeyPair,
@@ -9,21 +10,11 @@ import { hashPassword } from "@/lib/auth";
 
 /**
  * Seed the system with a hierarchical organization matching the recommended
- * topology from 02_NETWORK_TOPOLOGY.md:
+ * topology from 02_NETWORK_TOPOLOGY.md.
  *
- *   Headquarters (Root CA)
- *     ├─ Regional A (North America)
- *     │    ├─ Dept A1 ─ Sub-branch A1
- *     │    └─ Dept A2 ─ Sub-branch A2
- *     ├─ Regional B (Europe)
- *     │    ├─ Dept B1 ─ Sub-branch B1
- *     │    └─ Dept B2
- *     └─ Regional C (Asia-Pacific)
- *          ├─ Dept C1 ─ Sub-branch C1
- *          └─ Dept C2
- *
- * Each branch receives two ECC P-521 key pairs: one for ECDH (ENCRYPTION) and
- * one for ECDSA (SIGNING). Private keys are encrypted at rest with the master key.
+ * SECURITY: All passwords are randomly generated and returned in the seed
+ * result. They are NEVER stored in plaintext. The caller must save them
+ * securely (e.g., in a password manager or secure vault).
  */
 
 interface BranchSeed {
@@ -79,7 +70,51 @@ function makeKeyPairRecord(branchId: string, purpose: "ENCRYPTION" | "SIGNING"):
   };
 }
 
-export async function seedDatabase(): Promise<{ branches: number; keys: number; seeded: boolean }> {
+/**
+ * Generate a cryptographically strong random password.
+ * Length: 20 characters, mixed case + digits + symbols.
+ */
+function generateSecurePassword(): string {
+  const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const lower = "abcdefghijklmnopqrstuvwxyz";
+  const digits = "0123456789";
+  const symbols = "!@#$%^&*";
+  const all = upper + lower + digits + symbols;
+
+  // Ensure at least one of each category
+  let pw = "";
+  pw += upper[crypto.randomInt(upper.length)];
+  pw += lower[crypto.randomInt(lower.length)];
+  pw += digits[crypto.randomInt(digits.length)];
+  pw += symbols[crypto.randomInt(symbols.length)];
+
+  // Fill remaining with random from all categories
+  for (let i = 4; i < 20; i++) {
+    pw += all[crypto.randomInt(all.length)];
+  }
+
+  // Shuffle the password
+  const arr = pw.split("");
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr.join("");
+}
+
+export interface SeedResult {
+  branches: number;
+  keys: number;
+  seeded: boolean;
+  credentials?: Array<{
+    username: string;
+    password: string;
+    role: string;
+    branch: string;
+  }>;
+}
+
+export async function seedDatabase(): Promise<SeedResult> {
   // Idempotent: if branches already exist, skip.
   const existing = await db.branch.count();
   if (existing > 0) {
@@ -117,88 +152,88 @@ export async function seedDatabase(): Promise<{ branches: number; keys: number; 
     },
   });
 
-  // Provision user accounts:
-  //   - one OWNER (supreme authority — system activation, lockdown, key destruction)
-  //   - one SECURITY_ADMIN (user/branch/key management)
-  //   - one BRANCH_ADMIN per region (manages their region's departments)
-  //   - one USER per department
-  //   - one READONLY user on a sub-branch
+  // Provision user accounts with RANDOM passwords
   const departments = await db.branch.findMany({ where: { type: "DEPARTMENT" } });
   const regions = await db.branch.findMany({ where: { type: "REGIONAL" } });
   const subBranches = await db.branch.findMany({ where: { type: "SUB_BRANCH" } });
-  const usersCreated: { username: string; role: string; branch: string }[] = [];
+  const credentials: SeedResult["credentials"] = [];
 
-  // 1. System owner — sole supreme authority. No branch.
+  // 1. System owner
+  const ownerPw = generateSecurePassword();
   await db.user.create({
     data: {
       username: "owner",
       displayName: "System Owner",
-      passwordHash: hashPassword("owner123"),
+      passwordHash: hashPassword(ownerPw),
       role: "OWNER",
       branchId: null,
     },
   });
-  usersCreated.push({ username: "owner", role: "OWNER", branch: "—" });
+  credentials.push({ username: "owner", password: ownerPw, role: "OWNER", branch: "—" });
 
   // 2. Security administrator
+  const secPw = generateSecurePassword();
   await db.user.create({
     data: {
       username: "secadmin",
       displayName: "Security Administrator",
-      passwordHash: hashPassword("secadmin123"),
+      passwordHash: hashPassword(secPw),
       role: "SECURITY_ADMIN",
       branchId: null,
     },
   });
-  usersCreated.push({ username: "secadmin", role: "SECURITY_ADMIN", branch: "—" });
+  credentials.push({ username: "secadmin", password: secPw, role: "SECURITY_ADMIN", branch: "—" });
 
-  // 3. One branch admin per regional hub
+  // 3. Branch admins
   for (const reg of regions) {
     const username = `${reg.code.toLowerCase()}-admin`;
+    const pw = generateSecurePassword();
     await db.user.create({
       data: {
         username,
         displayName: `${reg.name} Administrator`,
-        passwordHash: hashPassword(username),
+        passwordHash: hashPassword(pw),
         role: "BRANCH_ADMIN",
         branchId: reg.id,
       },
     });
-    usersCreated.push({ username, role: "BRANCH_ADMIN", branch: reg.code });
+    credentials.push({ username, password: pw, role: "BRANCH_ADMIN", branch: reg.code });
   }
 
-  // 4. One USER per department — username/password = lowercased code
+  // 4. Department users
   for (const dept of departments) {
     const username = dept.code.toLowerCase();
+    const pw = generateSecurePassword();
     await db.user.create({
       data: {
         username,
         displayName: dept.name,
-        passwordHash: hashPassword(username),
+        passwordHash: hashPassword(pw),
         role: "USER",
         branchId: dept.id,
       },
     });
-    usersCreated.push({ username, role: "USER", branch: dept.code });
+    credentials.push({ username, password: pw, role: "USER", branch: dept.code });
   }
 
-  // 5. One READONLY user on the first sub-branch
+  // 5. Read-only user
   if (subBranches.length > 0) {
     const sub = subBranches[0];
     const username = `${sub.code.toLowerCase()}-viewer`;
+    const pw = generateSecurePassword();
     await db.user.create({
       data: {
         username,
         displayName: `${sub.name} (Read-Only)`,
-        passwordHash: hashPassword(username),
+        passwordHash: hashPassword(pw),
         role: "READONLY",
         branchId: sub.id,
       },
     });
-    usersCreated.push({ username, role: "READONLY", branch: sub.code });
+    credentials.push({ username, password: pw, role: "READONLY", branch: sub.code });
   }
 
-  // Initialize the singleton SystemState (active, not locked down).
+  // Initialize the singleton SystemState
   await db.systemState.upsert({
     where: { id: "singleton" },
     update: {},
@@ -210,9 +245,9 @@ export async function seedDatabase(): Promise<{ branches: number; keys: number; 
     actor: "SYSTEM",
     status: "SUCCESS",
     details: {
-      usersCreated: usersCreated.length,
+      usersCreated: credentials.length,
       message: "Seeded owner + security admin + branch admins + department users + readonly viewer",
-      roles: usersCreated.reduce((acc, u) => {
+      roles: credentials.reduce((acc, u) => {
         acc[u.role] = (acc[u.role] ?? 0) + 1;
         return acc;
       }, {} as Record<string, number>),
@@ -223,6 +258,7 @@ export async function seedDatabase(): Promise<{ branches: number; keys: number; 
     branches: BRANCH_SEEDS.length,
     keys: BRANCH_SEEDS.length * 2,
     seeded: true,
+    credentials,
   };
 }
 

@@ -108,8 +108,23 @@ export function UsersSection() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const [u, b] = await Promise.all([api.usersRaw(), api.branches()]);
+        if (isMounted) {
+          if (u.ok) setUsers(u.users);
+          if (b.ok) setBranches(b.branches.map((x: BranchLite & { type: string }) => ({ id: x.id, code: x.code, name: x.name, type: x.type })));
+        }
+      } catch {
+        // network error — keep previous state
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   const filtered = users.filter((u) => {
     if (!query) return true;

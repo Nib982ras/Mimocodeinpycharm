@@ -5,6 +5,8 @@ import { readCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
 import { requireSystemActive, authErrorResponse, ROLE_RANK } from "@/lib/auth";
+import { checkDocumentPermission } from "@/lib/document-permissions";
+import { enforceDocumentExpiry } from "@/lib/document-expiry";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -23,7 +25,7 @@ export const dynamic = "force-dynamic";
  *  5. Verify the ECDSA-SHA512 signature over the ciphertext
  *  6. Verify the SHA-512 document integrity hash
  *
- * Access control: only the recipient branch's users (or SECURITY_ADMIN+/OWNER) may decrypt.
+ * Access control: recipient branch members, users with DECRYPT permission, or SECURITY_ADMIN+.
  * READONLY users may never decrypt. System-active/lockdown rules enforced (owner bypasses).
  */
 export async function POST(
@@ -61,9 +63,15 @@ export async function POST(
     return NextResponse.json({ ok: false, error: "Document not found" }, { status: 404 });
   }
 
-  // Authorization: the recipient branch's users, or SECURITY_ADMIN+/OWNER, may decrypt.
-  const isAdmin = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
-  if (!isAdmin && doc.recipientBranchId !== session.branchId) {
+  // Authorization: check document permissions
+  const hasDecryptPermission = await checkDocumentPermission(id, {
+    userId: session.id,
+    branchId: session.branchId,
+    role: session.role,
+    requiredPermission: "DECRYPT",
+  });
+
+  if (!hasDecryptPermission) {
     await recordAudit({
       action: "DOWNLOAD",
       actor: session.username,
@@ -79,6 +87,24 @@ export async function POST(
     );
   }
 
+  // Check document expiry
+  const expiryCheck = await enforceDocumentExpiry(id);
+  if (!expiryCheck.allowed) {
+    await recordAudit({
+      action: "DOWNLOAD",
+      actor: session.username,
+      branchId: session.branchId ?? undefined,
+      documentId: doc.id,
+      status: "FAILURE",
+      details: { event: "DOCUMENT_EXPIRED", fileName: doc.name, expiresAt: doc.expiresAt?.toISOString() },
+      ipAddress: req.headers.get("x-forwarded-for") || undefined,
+    });
+    return NextResponse.json(
+      { ok: false, error: expiryCheck.error },
+      { status: 410 } // 410 Gone
+    );
+  }
+
   // Write decrypted plaintext to a temp file to avoid holding it all in memory for the response
   let tempFilePath: string | null = null;
 
@@ -91,7 +117,7 @@ export async function POST(
     // Sender's signing public key (reconstructed from the stored PEM).
     const senderPubPem = doc.senderKey.publicKeyPem;
 
-    const ciphertext = readCiphertext(doc.storagePath);
+    const ciphertext = await readCiphertext(doc.storagePath);
 
     const result = decryptDocument(
       ciphertext,

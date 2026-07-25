@@ -20,6 +20,12 @@ import {
   createSessionFingerprint,
   checkConcurrentSessions,
 } from "@/lib/session-security";
+import {
+  checkLoginCaptcha,
+  recordLoginFailure as recordCaptchaFailure,
+  clearLoginCaptcha,
+  verifyCaptcha,
+} from "@/lib/captcha";
 
 export const dynamic = "force-dynamic";
 
@@ -29,15 +35,17 @@ export const dynamic = "force-dynamic";
  * Rate limited: 5 attempts per 15 minutes per IP AND per username.
  * Dual tracking prevents distributed brute force across multiple IPs.
  * Progressive lockout doubles block duration on repeated violations.
+ * CAPTCHA required after threshold failures.
  */
 export async function POST(req: Request) {
   try {
     const body = await req.json().catch(() => ({}));
-    const { username, password, totpCode, backupCode } = body as {
+    const { username, password, totpCode, backupCode, captchaToken } = body as {
       username?: string;
       password?: string;
       totpCode?: string;
       backupCode?: string;
+      captchaToken?: string;
     };
 
     if (!username || !password) {
@@ -50,6 +58,33 @@ export async function POST(req: Request) {
     const ip = getClientIp(req);
     const ua = req.headers.get("user-agent") || undefined;
     const uname = username.toLowerCase();
+
+    // Check if CAPTCHA is required
+    const captchaCheck = await checkLoginCaptcha(ip, uname);
+    if (captchaCheck.required) {
+      if (!captchaToken) {
+        return NextResponse.json(
+          { ok: false, error: "CAPTCHA required", captchaRequired: true, siteKey: captchaCheck.siteKey },
+          { status: 400 }
+        );
+      }
+
+      // Verify CAPTCHA token
+      const captchaResult = await verifyCaptcha(captchaToken, ip);
+      if (!captchaResult.success) {
+        await recordAudit({
+          action: "LOGIN_FAILED",
+          actor: uname,
+          status: "FAILURE",
+          details: { reason: "CAPTCHA_FAILED", captchaError: captchaResult.error },
+          ipAddress: ip,
+        });
+        return NextResponse.json(
+          { ok: false, error: "CAPTCHA verification failed" },
+          { status: 400 }
+        );
+      }
+    }
 
     // Dual rate limiting: check both IP and username
     const rateLimit = await checkLoginRateLimit(ip, uname);
@@ -87,8 +122,11 @@ export async function POST(req: Request) {
       : verifyPassword(password, "00:00");
 
     if (!user || !passwordOk) {
-      // Record failure for both IP and username
+      // Record failure for both IP and username (rate limiting)
       await recordLoginFailure(ip, uname);
+
+      // Record failure for CAPTCHA tracking
+      await recordCaptchaFailure(ip, uname);
 
       await recordAudit({
         action: "LOGIN_FAILED",
@@ -188,6 +226,7 @@ export async function POST(req: Request) {
 
       if (!factorOk) {
         await recordLoginFailure(ip, uname);
+        await recordCaptchaFailure(ip, uname);
 
         await recordAudit({
           action: "2FA_FAIL",
@@ -230,6 +269,9 @@ export async function POST(req: Request) {
 
     // Success — reset rate limits for this IP and username
     await resetLoginRateLimit(ip, uname);
+
+    // Clear CAPTCHA tracking
+    await clearLoginCaptcha(ip, uname);
 
     // Enforce maximum concurrent sessions
     await checkConcurrentSessions(user.id);

@@ -87,7 +87,7 @@ export function generateBackupCodes(count = 10): string[] {
 /** Hash a backup code with scrypt for safe storage. Returns "salt:hash" hex. */
 export function hashBackupCode(code: string): string {
   const salt = crypto.randomBytes(8).toString("hex");
-  const hash = crypto.scryptSync(code.toUpperCase(), salt, 32).toString("hex");
+  const hash = crypto.scryptSync(code.toUpperCase(), salt, 32, { N: 65536, r: 8, p: 1 }).toString("hex");
   return `${salt}:${hash}`;
 }
 
@@ -95,7 +95,7 @@ export function hashBackupCode(code: string): string {
 export function verifyBackupCode(code: string, stored: string): boolean {
   const [salt, hash] = stored.split(":");
   if (!salt || !hash) return false;
-  const test = crypto.scryptSync(code.toUpperCase(), salt, 32).toString("hex");
+  const test = crypto.scryptSync(code.toUpperCase(), salt, 32, { N: 65536, r: 8, p: 1 }).toString("hex");
   return constantTimeEqual(hash, test);
 }
 

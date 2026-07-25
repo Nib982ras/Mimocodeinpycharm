@@ -31,7 +31,7 @@ export interface OnlineClient {
 
 export interface LiveNotification {
   id: string;
-  kind: "delivered" | "sent" | "decrypted" | "branch" | "presence";
+  kind: "delivered" | "sent" | "decrypted" | "branch" | "presence" | "message";
   title: string;
   description: string;
   createdAt: number;
@@ -79,9 +79,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Initialize session on mount
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    let isMounted = true;
+    const initSession = async () => {
+      try {
+        const res = await fetch("/api/auth/me", { credentials: "include" });
+        const data = await res.json();
+        if (isMounted) setUser((data.user as SessionUser | null) ?? null);
+      } catch {
+        if (isMounted) setUser(null);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    initSession();
+    return () => { isMounted = false; };
+  }, []);
 
   // If any API call returns 401 (session expired / invalidated), re-check the
   // session. getSession will return null → user becomes null → login screen.
@@ -156,15 +170,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const clearNotifications = useCallback(() => setNotifications([]), []);
 
   // Establish the hub connection whenever the user changes.
-  // Only branch-attached accounts (USER / BRANCH_ADMIN) join as a branch client.
+  // All authenticated users connect; branch users also join as a branch client.
   useEffect(() => {
     if (!user) return;
-    // SECURITY_ADMIN+ observe but don't join as a branch client.
     const isBranchUser =
       (user.role === "USER" || user.role === "BRANCH_ADMIN") && !!user.branch;
-    if (!isBranchUser) return;
-    const identity = user.branch!;
-    const sock = io("/?XTransformPort=3003", {
+    const identity = user.branch;
+    const sock = io("http://localhost:3003", {
       transports: ["websocket", "polling"],
       forceNew: true,
       reconnection: true,
@@ -176,22 +188,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     sock.on("connect", () => {
       setConnected(true);
-      sock.emit("client:join", {
-        branchId: identity.id,
-        branchCode: identity.code,
-        branchName: identity.name,
-        branchType: identity.type,
-      });
+      if (isBranchUser && identity) {
+        sock.emit("client:join", {
+          branchId: identity.id,
+          branchCode: identity.code,
+          branchName: identity.name,
+          branchType: identity.type,
+        });
+      }
     });
     sock.on("disconnect", () => setConnected(false));
     sock.on("connect_error", () => setConnected(false));
 
     sock.on("client:joined", () => {
-      pushNotification({
-        kind: "presence",
-        title: `Connected as ${identity.code}`,
-        description: `${identity.name} is now online on the exchange hub.`,
-      });
+      if (identity) {
+        pushNotification({
+          kind: "presence",
+          title: `Connected as ${identity.code}`,
+          description: `${identity.name} is now online on the exchange hub.`,
+        });
+      }
     });
 
     sock.on("clients:list", (data: { clients: OnlineClient[]; count: number }) => {
@@ -221,32 +237,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     });
 
-    sock.on("document:delivered", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
-      if (doc.recipient.code === identity.code) {
-        pushNotification({
-          kind: "delivered",
-          title: `Encrypted document received`,
-          description: `${doc.sender.code} → you · ${doc.name}`,
-        });
-      }
-    });
-    sock.on("document:sent", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
-      if (doc.sender.code === identity.code) {
-        pushNotification({
-          kind: "sent",
-          title: `Dispatch confirmed`,
-          description: `${doc.name} delivered to ${doc.recipient.code}.`,
-        });
-      }
-    });
-    sock.on("document:decrypted", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
-      if (doc.sender.code === identity.code) {
-        pushNotification({
-          kind: "decrypted",
-          title: `Receipt: ${doc.recipient.code} opened your document`,
-          description: `${doc.name} was decrypted by the recipient.`,
-        });
-      }
+    if (isBranchUser && identity) {
+      sock.on("document:delivered", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
+        if (doc.recipient.code === identity.code) {
+          pushNotification({
+            kind: "delivered",
+            title: `Encrypted document received`,
+            description: `${doc.sender.code} → you · ${doc.name}`,
+          });
+        }
+      });
+      sock.on("document:sent", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
+        if (doc.sender.code === identity.code) {
+          pushNotification({
+            kind: "sent",
+            title: `Dispatch confirmed`,
+            description: `${doc.name} delivered to ${doc.recipient.code}.`,
+          });
+        }
+      });
+      sock.on("document:decrypted", (doc: { id: string; name: string; sender: { code: string }; recipient: { code: string } }) => {
+        if (doc.sender.code === identity.code) {
+          pushNotification({
+            kind: "decrypted",
+            title: `Receipt: ${doc.recipient.code} opened your document`,
+            description: `${doc.name} was decrypted by the recipient.`,
+          });
+        }
+      });
+    }
+
+    sock.on("message:receive", (msg: any) => {
+      pushNotification({
+        kind: "message",
+        title: `Message from ${msg.fromUser.displayName}`,
+        description: msg.text.length > 50 ? msg.text.substring(0, 50) + "..." : msg.text,
+      });
     });
 
     return () => {

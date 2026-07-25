@@ -67,8 +67,20 @@ export function DevicesSection() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const res = await api.devices();
+        if (isMounted) setDevices(res.devices);
+      } catch {
+        // 401 → auth:unauthorized event flips to login; other errors keep state.
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   const activeCount = devices.filter((d) => d.status === "ACTIVE").length;
 

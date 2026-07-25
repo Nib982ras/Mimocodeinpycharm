@@ -1,46 +1,81 @@
 import crypto from "crypto";
 import fs from "fs";
 import path from "path";
-import { generateEcKeyPair, sign, verify, type KeyPairPem } from "@/lib/crypto";
+import { generateEcKeyPair, sign, verify, encryptPrivateKey, decryptPrivateKey, type KeyPairPem } from "@/lib/crypto";
 
 /**
  * License management — cryptographically signed device licenses.
  *
- * Each license binds a device's public key to an expiry + tier. The license
- * payload is signed with the system's ECDSA-P521 licensing key. Validation
- * verifies the signature against the licensing public key — NOT spoofable
- * hardware IDs like MAC addresses.
- *
- * The licensing key pair is generated on first run and persisted to disk
- * (server-side only). In production this would live in an HSM.
+ * The licensing key pair is encrypted at rest with the master key (same as
+ * branch keys). This prevents license forgery if the file system is compromised.
  */
 
 const LICENSING_KEY_PATH = path.join(process.cwd(), "db", ".licensing-key.json");
 
 interface LicensingKey {
+  encryptedPrivateKeyPem: string;
+  privateKeyIv: string;
   publicKeyPem: string;
-  privateKeyPem: string;
   fingerprint: string;
 }
 
 let _key: LicensingKey | null = null;
+let _decryptedPrivateKey: string | null = null;
 
-/** Get (or generate on first run) the system's ECDSA licensing key pair. */
+/**
+ * Get (or generate on first run) the system's ECDSA licensing key pair.
+ * The private key is encrypted at rest with the master key.
+ */
 function getLicensingKey(): LicensingKey {
   if (_key) return _key;
+
   if (fs.existsSync(LICENSING_KEY_PATH)) {
-    _key = JSON.parse(fs.readFileSync(LICENSING_KEY_PATH, "utf8")) as LicensingKey;
+    const raw = JSON.parse(fs.readFileSync(LICENSING_KEY_PATH, "utf8")) as LicensingKey;
+
+    // Handle legacy plaintext format — re-encrypt with master key
+    const legacyRaw = raw as unknown as { privateKeyPem?: string; publicKeyPem: string; fingerprint: string };
+    if (legacyRaw.privateKeyPem && !raw.encryptedPrivateKeyPem) {
+      const enc = encryptPrivateKey(legacyRaw.privateKeyPem);
+      const migrated: LicensingKey = {
+        encryptedPrivateKeyPem: enc.ciphertext,
+        privateKeyIv: enc.iv,
+        publicKeyPem: raw.publicKeyPem,
+        fingerprint: raw.fingerprint,
+      };
+      fs.writeFileSync(LICENSING_KEY_PATH, JSON.stringify(migrated, null, 2), { mode: 0o600 });
+      _key = migrated;
+      return _key;
+    }
+
+    _key = raw;
     return _key;
   }
+
+  // Generate new key pair and encrypt the private key
   const kp: KeyPairPem = generateEcKeyPair();
-  _key = {
+  const enc = encryptPrivateKey(kp.privateKeyPem);
+  const keyData: LicensingKey = {
+    encryptedPrivateKeyPem: enc.ciphertext,
+    privateKeyIv: enc.iv,
     publicKeyPem: kp.publicKeyPem,
-    privateKeyPem: kp.privateKeyPem,
     fingerprint: kp.fingerprint,
   };
+
   fs.mkdirSync(path.dirname(LICENSING_KEY_PATH), { recursive: true });
-  fs.writeFileSync(LICENSING_KEY_PATH, JSON.stringify(_key, null, 2), { mode: 0o600 });
+  fs.writeFileSync(LICENSING_KEY_PATH, JSON.stringify(keyData, null, 2), { mode: 0o600 });
+  _key = keyData;
   return _key;
+}
+
+/**
+ * Get the decrypted licensing private key (cached in memory).
+ * This is only decrypted when needed for signing operations.
+ */
+function getDecryptedPrivateKey(): string {
+  if (_decryptedPrivateKey) return _decryptedPrivateKey;
+  const key = getLicensingKey();
+  _decryptedPrivateKey = decryptPrivateKey(key.encryptedPrivateKeyPem, key.privateKeyIv);
+  return _decryptedPrivateKey;
 }
 
 /** Public key (PEM) for license signature verification — safe to expose. */
@@ -90,8 +125,8 @@ function payloadBuffer(p: LicensePayload): Buffer {
 
 /** Sign a license payload with the system's ECDSA-P521-SHA512 licensing key. */
 export function signLicense(payload: LicensePayload): string {
-  const key = getLicensingKey();
-  const sig = sign(key.privateKeyPem, payloadBuffer(payload));
+  const privateKeyPem = getDecryptedPrivateKey();
+  const sig = sign(privateKeyPem, payloadBuffer(payload));
   return sig.toString("base64");
 }
 

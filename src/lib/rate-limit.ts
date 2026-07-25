@@ -1,16 +1,18 @@
 import { db } from "@/lib/db";
+import { getRedis, redisGet, redisSet, redisIncr, redisDel } from "@/lib/redis";
 
 /**
- * Database-backed rate limiter for API endpoints.
+ * Hybrid rate limiter with Redis + database fallback.
  *
- * Uses the RateLimitAttempt model for persistent storage that:
- *   - Survives process restarts
- *   - Works across multiple instances (with PostgreSQL)
- *   - Tracks both per-IP and per-username attempts
- *   - Supports progressive lockout with exponential backoff
+ * When Redis is available:
+ *   - Sub-millisecond rate limit checks
+ *   - Atomic operations prevent race conditions
+ *   - Works across multiple instances
+ *   - Automatic TTL-based expiration (no cleanup needed)
  *
- * For high-traffic production with PostgreSQL, consider replacing
- * with Redis-backed rate limiting for sub-millisecond checks.
+ * When Redis is unavailable:
+ *   - Falls back to PostgreSQL-backed storage
+ *   - Full functionality maintained
  */
 
 // ---------- Configuration ----------
@@ -52,6 +54,9 @@ export interface RateLimitResult {
   attemptCount: number;
 }
 
+// Redis key prefix for rate limiting
+const REDIS_RL_PREFIX = "rl:";
+
 /**
  * Check rate limit for a given key and action.
  * Returns whether the request is allowed, remaining attempts, and reset time.
@@ -68,7 +73,98 @@ export async function checkRateLimit(
   const cfg = { ...DEFAULT_CONFIG, ...config };
   const now = new Date();
   const windowStart = new Date(now.getTime() - cfg.windowMs);
+  const redisKey = `${REDIS_RL_PREFIX}${key}:${action}`;
+  const blockKey = `${REDIS_RL_PREFIX}block:${key}:${action}`;
 
+  // Try Redis first
+  const redis = getRedis();
+  if (redis) {
+    try {
+      return await checkRateLimitRedis(redisKey, blockKey, cfg, now);
+    } catch (err) {
+      console.error("[rate-limit] Redis error, falling back to database:", err);
+      // Fall through to database
+    }
+  }
+
+  // Database fallback
+  return await checkRateLimitDatabase(key, action, cfg, now, windowStart);
+}
+
+/**
+ * Redis-backed rate limit check using sliding window.
+ */
+async function checkRateLimitRedis(
+  redisKey: string,
+  blockKey: string,
+  cfg: RateLimitConfig,
+  now: Date
+): Promise<RateLimitResult> {
+  const redis = getRedis();
+  if (!redis) throw new Error("Redis not available");
+
+  const windowSeconds = Math.ceil(cfg.windowMs / 1000);
+
+  // Check if currently blocked
+  const blockedUntil = await redis.get(blockKey);
+  if (blockedUntil) {
+    const blockExpiry = parseInt(blockedUntil, 10);
+    if (blockExpiry > now.getTime()) {
+      return {
+        allowed: false,
+        remaining: 0,
+        resetAt: blockExpiry,
+        blockedUntil: blockExpiry,
+        attemptCount: cfg.maxAttempts,
+      };
+    }
+    // Block expired, clean up
+    await redis.del(blockKey);
+  }
+
+  // Get current count in window
+  const countStr = await redis.get(redisKey);
+  const currentCount = countStr ? parseInt(countStr, 10) : 0;
+
+  if (currentCount >= cfg.maxAttempts) {
+    // Calculate progressive block duration
+    const blocksExceeded = Math.floor((currentCount - cfg.maxAttempts) / cfg.maxAttempts);
+    const blockDuration = cfg.blockMs * Math.pow(cfg.progressiveMultiplier, blocksExceeded);
+    const blockExpiry = now.getTime() + blockDuration;
+
+    // Set block with TTL
+    await redis.setex(blockKey, Math.ceil(blockDuration / 1000), blockExpiry.toString());
+
+    return {
+      allowed: false,
+      remaining: 0,
+      resetAt: blockExpiry,
+      blockedUntil: blockExpiry,
+      attemptCount: currentCount,
+    };
+  }
+
+  // Increment count
+  const newCount = await redisIncr(redisKey, windowSeconds);
+
+  return {
+    allowed: true,
+    remaining: Math.max(0, cfg.maxAttempts - newCount),
+    resetAt: now.getTime() + cfg.windowMs,
+    attemptCount: newCount,
+  };
+}
+
+/**
+ * Database-backed rate limit check (PostgreSQL fallback).
+ */
+async function checkRateLimitDatabase(
+  key: string,
+  action: string,
+  cfg: RateLimitConfig,
+  now: Date,
+  windowStart: Date
+): Promise<RateLimitResult> {
   try {
     // Find or create the rate limit record
     const existing = await db.rateLimitAttempt.findUnique({
@@ -174,7 +270,21 @@ export async function recordFailure(
   const cfg = { ...DEFAULT_CONFIG, ...config };
   const now = new Date();
   const windowStart = new Date(now.getTime() - cfg.windowMs);
+  const redisKey = `${REDIS_RL_PREFIX}${key}:${action}`;
 
+  // Try Redis first
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const windowSeconds = Math.ceil(cfg.windowMs / 1000);
+      await redisIncr(redisKey, windowSeconds);
+      return;
+    } catch (err) {
+      console.error("[rate-limit] Redis error, falling back to database:", err);
+    }
+  }
+
+  // Database fallback
   try {
     const existing = await db.rateLimitAttempt.findUnique({
       where: { key_action: { key, action } },
@@ -201,6 +311,22 @@ export async function recordFailure(
  * Reset rate limit for a key (e.g., after successful login).
  */
 export async function resetRateLimit(key: string, action: string): Promise<void> {
+  const redisKey = `${REDIS_RL_PREFIX}${key}:${action}`;
+  const blockKey = `${REDIS_RL_PREFIX}block:${key}:${action}`;
+
+  // Try Redis first
+  const redis = getRedis();
+  if (redis) {
+    try {
+      await redisDel(redisKey);
+      await redisDel(blockKey);
+      return;
+    } catch (err) {
+      console.error("[rate-limit] Redis error, falling back to database:", err);
+    }
+  }
+
+  // Database fallback
   try {
     await db.rateLimitAttempt.deleteMany({
       where: { key, action },
@@ -212,9 +338,18 @@ export async function resetRateLimit(key: string, action: string): Promise<void>
 
 /**
  * Clean up expired rate limit records.
- * Call periodically (e.g., every hour) to prevent table bloat.
+ * Redis handles expiration automatically via TTL, so this only runs for database fallback.
  */
 export async function cleanupExpiredRateLimits(): Promise<number> {
+  // Redis handles cleanup automatically via TTL
+  // Only clean database when Redis is not available
+  const redis = getRedis();
+  if (redis) {
+    // Redis handles expiration via TTL, nothing to clean
+    return 0;
+  }
+
+  // Database fallback cleanup
   try {
     const result = await db.rateLimitAttempt.deleteMany({
       where: {
@@ -286,6 +421,30 @@ export async function getRateLimitStatus(
   key: string,
   action: string
 ): Promise<{ count: number; windowStart: Date; blockedUntil: Date | null } | null> {
+  const redisKey = `${REDIS_RL_PREFIX}${key}:${action}`;
+  const blockKey = `${REDIS_RL_PREFIX}block:${key}:${action}`;
+
+  // Try Redis first
+  const redis = getRedis();
+  if (redis) {
+    try {
+      const countStr = await redis.get(redisKey);
+      const blockedStr = await redis.get(blockKey);
+
+      const count = countStr ? parseInt(countStr, 10) : 0;
+      const blockedUntil = blockedStr ? new Date(parseInt(blockedStr, 10)) : null;
+
+      // Get TTL for window start approximation
+      const ttl = await redis.ttl(redisKey);
+      const windowStart = new Date(Date.now() - (DEFAULT_CONFIG.windowMs / 1000 - ttl) * 1000);
+
+      return { count, windowStart, blockedUntil };
+    } catch {
+      // Fall through to database
+    }
+  }
+
+  // Database fallback
   try {
     const record = await db.rateLimitAttempt.findUnique({
       where: { key_action: { key, action } },

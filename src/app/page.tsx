@@ -28,6 +28,7 @@ import {
 } from "@/components/ui/sheet";
 import { AuthProvider, useAuth } from "@/components/auth-provider";
 import { UserMenu, NotificationsBell, ConnectedClientsPanel } from "@/components/client-ui";
+import { ChatPanel } from "@/components/chat-panel";
 import { LoginScreen } from "@/components/login-screen";
 import { DashboardSection } from "@/components/sections/dashboard";
 import { DocumentsSection } from "@/components/sections/documents";
@@ -98,6 +99,7 @@ function Shell() {
   const [section, setSection] = useState<SectionId>("dashboard");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [sysState, setSysState] = useState<SystemState | null>(null);
+  const [dmUser, setDmUser] = useState<{ id: string; displayName: string; branchCode: string } | null>(null);
 
   // Lightly poll the system state (every 15s) so the header badge reflects
   // lockdown / deactivated conditions without requiring the user to navigate.
@@ -203,7 +205,10 @@ function Shell() {
             <div className="flex justify-between"><span>Signature</span><span className="text-emerald-300">ECDSA-S512</span></div>
           </div>
         </div>
-        <ConnectedClientsPanel />
+        <ConnectedClientsPanel onDmUser={setDmUser} />
+        <div className="mt-4">
+          <ChatPanel dmUser={dmUser} onClearDm={() => setDmUser(null)} />
+        </div>
       </div>
     </div>
   );

@@ -79,8 +79,20 @@ export function SystemSection() {
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const res = await api.systemState();
+        if (isMounted) setState(res);
+      } catch {
+        /* 401 handled centrally */
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   const runAction = async () => {
     setBusy(true);
@@ -437,8 +449,20 @@ function KeyDestructionPanel({ toast }: { toast: ReturnType<typeof useToast>["to
   }, []);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const res = await api.keys();
+        if (isMounted) setKeys(res.keys);
+      } catch {
+        /* ignore */
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   const handleDestroy = async () => {
     if (!target) return;

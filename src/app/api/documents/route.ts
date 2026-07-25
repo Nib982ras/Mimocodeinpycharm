@@ -209,7 +209,7 @@ export async function POST(req: Request) {
     const enc = encryptDocument(plaintext, senderPrivPem, recipientKey.publicKeyPem);
 
     const docId = randomUUID();
-    const storagePath = storeCiphertext(docId, enc.ciphertext);
+    const storagePath = await storeCiphertext(docId, enc.ciphertext);
 
     const doc = await db.document.create({
       data: {

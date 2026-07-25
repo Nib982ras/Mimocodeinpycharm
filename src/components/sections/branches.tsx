@@ -53,7 +53,21 @@ export function BranchesSection() {
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    let isMounted = true;
+    const loadData = async () => {
+      try {
+        const res = await api.branches();
+        if (isMounted) setBranches(res.branches);
+      } catch {
+        // 401 → auth:unauthorized event flips to login; other errors keep state.
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    };
+    loadData();
+    return () => { isMounted = false; };
+  }, []);
 
   const tree = buildTree(branches);
 
