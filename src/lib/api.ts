@@ -44,6 +44,7 @@ export function isUnauthorized(err: unknown): boolean {
 export const api = {
   seed: () => json<{ ok: boolean; branches: number; keys: number; seeded: boolean }>("/api/seed", { method: "POST" }),
   dashboard: () => json<import("@/lib/types").DashboardData>("/api/dashboard"),
+  monitoring: () => json<import("@/lib/types").MonitoringData>("/api/monitoring"),
   branches: () => json<{ ok: boolean; branches: import("@/lib/types").Branch[] }>("/api/branches"),
   createBranch: (data: { name: string; code: string; type: string; region?: string; parentId?: string }) =>
     json<{ ok: boolean; branch: import("@/lib/types").Branch }>("/api/branches", {

@@ -258,3 +258,56 @@ export interface SessionUser {
   twoFactorEnabled: boolean;
   twoFactorEnforced: boolean;
 }
+
+// ---- Monitoring dashboard ----
+
+export interface MonitoringData {
+  ok: boolean;
+  timestamp: string;
+  entities: {
+    users: number;
+    activeUsers: number;
+    suspendedUsers: number;
+    branches: number;
+    documents: number;
+    keys: number;
+    activeKeys: number;
+    sessions: number;
+    activeSessions: number;
+    devices: number;
+    licenses: number;
+    auditEvents: number;
+  };
+  timeSeries: {
+    documentsPerHour: Array<{ hour: string; count: number }>;
+    auditPerHour: Array<{ hour: string; count: number }>;
+    authAttempts: Array<{ hour: string; success: number; failure: number }>;
+  };
+  breakdowns: {
+    documentsByStatus: Array<{ status: string; count: number }>;
+    documentsByBranch: Array<{ code: string; name: string; count: number }>;
+    auditByAction: Array<{ action: string; count: number }>;
+    authByMethod: Array<{ method: string; status: string; count: number }>;
+    usersByRole: Array<{ role: string; count: number }>;
+    keysByStatus: Array<{ status: string; count: number }>;
+  };
+  securityEvents: Array<{
+    id: string;
+    action: string;
+    actor: string;
+    status: string;
+    ipAddress: string | null;
+    createdAt: string;
+    details: string | null;
+  }>;
+  health: {
+    uptime: number;
+    memoryMB: { rss: number; heapUsed: number; heapTotal: number };
+    redis: boolean;
+    dbQueryAvgMs: number;
+    httpRequests: number;
+    httpErrors: number;
+    encryptOps: number;
+    cache: Record<string, { hits: number; misses: number; sets: number; deletes: number; evictions: number; size: number; hitRate: number }>;
+  };
+}

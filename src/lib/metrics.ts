@@ -55,6 +55,18 @@ export function getCounter(name: string, labels?: Record<string, string>): numbe
   return counters.get(key) || 0;
 }
 
+export function getGauge(name: string, labels?: Record<string, string>): number {
+  const key = buildKey(name, labels);
+  return gauges.get(key) || 0;
+}
+
+export function getHistogramStats(name: string, labels?: Record<string, string>): { sum: number; count: number; avg: number } | null {
+  const key = buildKey(name, labels);
+  const hist = histograms.get(key);
+  if (!hist || hist.count === 0) return null;
+  return { sum: hist.sum, count: hist.count, avg: hist.sum / hist.count };
+}
+
 // ============================================================================
 // Gauge operations
 // ============================================================================

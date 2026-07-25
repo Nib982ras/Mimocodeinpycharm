@@ -253,6 +253,18 @@ export function invalidateSystemState(): void {
 }
 
 /**
+ * Aggregate cache statistics across all named caches.
+ */
+export function getCacheStats(): Record<string, ReturnType<Cache["getStats"]>> {
+  return {
+    systemState: systemStateCache.getStats(),
+    session: sessionCache.getStats(),
+    branch: branchCache.getStats(),
+    dashboard: dashboardCache.getStats(),
+  };
+}
+
+/**
  * Get-or-set pattern for cache.
  * Returns cached value if available, otherwise calls the factory and caches the result.
  */

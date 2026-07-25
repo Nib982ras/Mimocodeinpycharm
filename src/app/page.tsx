@@ -17,6 +17,7 @@ import {
   AlertOctagon,
   PowerOff,
   Crown,
+  BarChart3,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,12 +40,13 @@ import { UsersSection } from "@/components/sections/users";
 import { DevicesSection } from "@/components/sections/devices";
 import { LicensesSection } from "@/components/sections/licenses";
 import { SystemSection } from "@/components/sections/system";
+import { MonitoringSection } from "@/components/sections/monitoring";
 import { Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { hasMinRole, type Role, type SystemState } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type SectionId = "dashboard" | "documents" | "branches" | "keys" | "audit" | "users" | "devices" | "licenses" | "system";
+type SectionId = "dashboard" | "documents" | "branches" | "keys" | "audit" | "users" | "devices" | "licenses" | "system" | "monitoring";
 
 interface NavItem {
   id: SectionId;
@@ -64,6 +66,7 @@ const NAV: NavItem[] = [
   { id: "licenses", label: "Licenses", description: "Signed device licenses", icon: BadgeCheck, minRole: "SECURITY_ADMIN" },
   { id: "audit", label: "Audit Log", description: "Immutable trail", icon: ScrollText },
   { id: "system", label: "System", description: "Owner control panel", icon: Server, minRole: "OWNER" },
+  { id: "monitoring", label: "Monitoring", description: "Real-time metrics", icon: BarChart3, minRole: "SECURITY_ADMIN" },
 ];
 
 const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
@@ -76,6 +79,7 @@ const SECTION_TITLES: Record<SectionId, { title: string; subtitle: string }> = {
   licenses: { title: "Cryptographic Licenses", subtitle: "ECDSA-P521-SHA512 signed device licenses" },
   audit: { title: "Immutable Audit Trail", subtitle: "Tamper-evident log of all cryptographic operations" },
   system: { title: "Owner Control Panel", subtitle: "System activation, emergency lockdown, and key destruction" },
+  monitoring: { title: "Monitoring Dashboard", subtitle: "Real-time system metrics, performance, and security events" },
 };
 
 const ROLE_HEADER_META: Record<Role, { label: string; className: string; icon: typeof Crown }> = {
@@ -287,6 +291,7 @@ function Shell() {
             {activeSection === "licenses" && <LicensesSection />}
             {activeSection === "audit" && <AuditSection />}
             {activeSection === "system" && <SystemSection />}
+            {activeSection === "monitoring" && <MonitoringSection />}
           </main>
 
           <footer className="mt-auto border-t border-slate-800 bg-slate-900/40 px-4 md:px-6 py-3">
