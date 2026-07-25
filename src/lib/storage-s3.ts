@@ -9,7 +9,10 @@ import { StorageBackend } from "./storage-abstraction";
 
 // S3 client will be lazily loaded
 let s3Client: any = null;
-let s3Config: any = null;
+let s3Config: S3StorageConfig | null = null;
+
+// Maximum upload size: 100MB (matches upload.ts MAX_FILE_SIZE)
+const MAX_S3_UPLOAD_SIZE = 100 * 1024 * 1024;
 
 interface S3StorageConfig {
   bucket: string;
@@ -62,21 +65,34 @@ export class S3StorageBackend implements StorageBackend {
   }
 
   /**
-   * Sanitize key for S3 (no path traversal, safe characters only).
+   * Sanitize key for S3 — allowlist validation, no path traversal.
+   * Only alphanumeric, hyphens, underscores, forward slashes, and dots are allowed.
    */
   private sanitizeKey(key: string): string {
-    // Remove any path traversal attempts
-    const sanitized = key.replace(/\.\./g, "").replace(/~/g, "");
-
-    // Ensure key starts with documents/ prefix for organization
-    if (!sanitized.startsWith("documents/")) {
-      return `documents/${sanitized}`;
+    // Allowlist validation: reject anything outside safe characters
+    if (!/^[a-zA-Z0-9/_\-\.]+$/.test(key)) {
+      throw new Error(`Invalid S3 key: contains disallowed characters`);
     }
 
-    return sanitized;
+    // Reject path traversal
+    if (key.includes("..") || key.includes("~")) {
+      throw new Error(`Invalid S3 key: path traversal detected`);
+    }
+
+    // Ensure key starts with documents/ prefix for organization
+    if (!key.startsWith("documents/")) {
+      return `documents/${key}`;
+    }
+
+    return key;
   }
 
   async store(docId: string, data: Buffer): Promise<string> {
+    // Enforce size limit
+    if (data.length > MAX_S3_UPLOAD_SIZE) {
+      throw new Error(`Data too large: ${data.length} bytes (max: ${MAX_S3_UPLOAD_SIZE})`);
+    }
+
     const client = await getS3Client(this.config);
     const { PutObjectCommand } = await import("@aws-sdk/client-s3");
 

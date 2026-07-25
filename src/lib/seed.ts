@@ -106,6 +106,8 @@ export interface SeedResult {
   branches: number;
   keys: number;
   seeded: boolean;
+  /** Credentials only included when called by OWNER in non-production.
+   *  In production, passwords are logged server-side only. */
   credentials?: Array<{
     username: string;
     password: string;

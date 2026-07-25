@@ -1,6 +1,4 @@
 import crypto from "crypto";
-import fs from "fs";
-import path from "path";
 
 /**
  * Cryptographic foundation for the Secure Multi-Branch Document Exchange System.
@@ -12,23 +10,52 @@ import path from "path";
  *  - SHA-512 for document hashing and ECDSA signatures
  *  - Ephemeral keys per document for perfect forward secrecy
  *
- * Private keys are encrypted at rest with a master key (AES-256-GCM) that is
- * stored in a file on the server (stand-in for an HSM in this reference build).
+ * Private keys are encrypted at rest with a master key (AES-256-GCM) loaded
+ * from the MASTER_KEY environment variable (or auto-generated in development).
  */
 
 const CURVE = "secp521r1";
 
 // ---------- Master key (HSM stand-in) ----------
 
-const MASTER_KEY_PATH = path.join(process.cwd(), "db", ".master-key");
+/**
+ * Retrieve the master encryption key.
+ *
+ * Priority:
+ *   1. MASTER_KEY environment variable (REQUIRED in production)
+ *   2. Auto-generated random key (development only — NOT persisted to disk)
+ *
+ * In production, set MASTER_KEY via your secrets manager or deployment pipeline:
+ *   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+ *
+ * WARNING: Changing this key makes ALL existing encrypted data unrecoverable.
+ */
+let _masterKey: Buffer | null = null;
 
 function getMasterKey(): Buffer {
-  if (!fs.existsSync(MASTER_KEY_PATH)) {
-    const key = crypto.randomBytes(32); // 256-bit master key
-    fs.mkdirSync(path.dirname(MASTER_KEY_PATH), { recursive: true });
-    fs.writeFileSync(MASTER_KEY_PATH, key.toString("hex"), { mode: 0o600 });
+  if (_masterKey) return _masterKey;
+
+  const envKey = process.env.MASTER_KEY;
+  if (envKey) {
+    const key = Buffer.from(envKey.trim(), "hex");
+    if (key.length !== 32) {
+      throw new Error("MASTER_KEY must be a 64-character hex string (256 bits)");
+    }
+    _masterKey = key;
+    return _masterKey;
   }
-  return Buffer.from(fs.readFileSync(MASTER_KEY_PATH, "utf8").trim(), "hex");
+
+  // Development-only fallback: generate ephemeral key (not persisted)
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "MASTER_KEY environment variable is required in production. " +
+      "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+    );
+  }
+
+  console.warn("[crypto] WARNING: Using ephemeral master key — data encrypted THIS session will NOT be recoverable after restart. Set MASTER_KEY for persistence.");
+  _masterKey = crypto.randomBytes(32);
+  return _masterKey;
 }
 
 /** Encrypt a private key (PEM) with the master key using AES-256-GCM. */
@@ -187,7 +214,9 @@ export function verify(
   verifier.end();
   try {
     return verifier.verify(publicKeyPem, signature);
-  } catch {
+  } catch (err) {
+    // Log unexpected crypto errors (invalid key format, etc.) but don't leak details
+    console.error("[crypto] Signature verification error:", err instanceof Error ? err.message : "unknown");
     return false;
   }
 }

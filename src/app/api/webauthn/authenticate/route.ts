@@ -1,9 +1,23 @@
 import { NextResponse } from "next/server";
 import { startAuthentication, completeAuthentication } from "@/lib/webauthn";
-import { createSessionToken } from "@/lib/auth";
+import {
+  createSessionToken,
+  getSystemState,
+  authErrorResponse,
+} from "@/lib/auth";
 import { db } from "@/lib/db";
 import { cookies } from "next/headers";
 import { recordAudit } from "@/lib/audit";
+import {
+  checkLoginRateLimit,
+  recordLoginFailure,
+  resetLoginRateLimit,
+  getClientIp,
+} from "@/lib/rate-limit";
+import {
+  createSessionFingerprint,
+  checkConcurrentSessions,
+} from "@/lib/session-security";
 
 export const dynamic = "force-dynamic";
 
@@ -35,8 +49,16 @@ export async function POST(req: Request) {
  *
  * Complete WebAuthn authentication process.
  * Verifies the authenticator response and creates a session.
+ *
+ * Security controls (matching password login):
+ *   - Rate limiting (IP + credential ID)
+ *   - System state checks (active + lockdown)
+ *   - Session fingerprint binding
+ *   - Concurrent session enforcement
  */
 export async function PUT(req: Request) {
+  const ip = getClientIp(req);
+
   try {
     const body = await req.json();
 
@@ -52,15 +74,43 @@ export async function PUT(req: Request) {
       );
     }
 
+    // Rate limit by IP and credential ID
+    const credentialId = response?.id || "unknown";
+    const rateLimitKey = `${ip}:webauthn:${credentialId}`;
+    const rateLimit = await checkLoginRateLimit(ip, rateLimitKey);
+
+    if (!rateLimit.allowed) {
+      await recordAudit({
+        action: "LOGIN_FAILED",
+        actor: "unknown",
+        status: "FAILURE",
+        details: { reason: "RATE_LIMITED", method: "WEBAUTHN" },
+        ipAddress: ip,
+      });
+
+      return NextResponse.json(
+        { ok: false, error: "Too many authentication attempts. Please try again later." },
+        {
+          status: 429,
+          headers: rateLimit.retryAfter
+            ? { "Retry-After": String(rateLimit.retryAfter) }
+            : {},
+        }
+      );
+    }
+
     const result = await completeAuthentication(options, response);
 
     if (!result.verified || !result.userId) {
+      // Record failure for rate limiting
+      await recordLoginFailure(ip, rateLimitKey);
+
       await recordAudit({
         action: "LOGIN_FAILED",
         actor: "unknown",
         status: "FAILURE",
         details: { event: "WEBAUTHN_FAILED", reason: "Verification failed" },
-        ipAddress: req.headers.get("x-forwarded-for") || undefined,
+        ipAddress: ip,
       });
 
       return NextResponse.json(
@@ -79,19 +129,65 @@ export async function PUT(req: Request) {
     });
 
     if (!user || user.status !== "ACTIVE") {
+      await recordAudit({
+        action: "LOGIN_FAILED",
+        actor: user?.username || "unknown",
+        actorId: user?.id,
+        status: "FAILURE",
+        details: { reason: user ? user.status : "NOT_FOUND", method: "WEBAUTHN" },
+        ipAddress: ip,
+      });
+
       return NextResponse.json(
         { ok: false, error: "Account not found or inactive" },
         { status: 401 }
       );
     }
 
-    // Create session token
+    // System-wide guards (matching password login)
+    const state = await getSystemState();
+    if (user.role !== "OWNER") {
+      if (!state.active) {
+        await recordAudit({
+          action: "LOGIN_FAILED",
+          actor: user.username,
+          actorId: user.id,
+          status: "FAILURE",
+          details: { reason: "SYSTEM_DEACTIVATED", method: "WEBAUTHN" },
+          ipAddress: ip,
+        });
+        return NextResponse.json(
+          { ok: false, error: "System deactivated" },
+          { status: 403 }
+        );
+      }
+      if (state.lockdown) {
+        await recordAudit({
+          action: "LOGIN_FAILED",
+          actor: user.username,
+          actorId: user.id,
+          status: "FAILURE",
+          details: { reason: "SYSTEM_LOCKDOWN", method: "WEBAUTHN" },
+          ipAddress: ip,
+        });
+        return NextResponse.json(
+          { ok: false, error: "System in lockdown" },
+          { status: 403 }
+        );
+      }
+    }
+
+    // Create session fingerprint for binding
+    const fingerprint = createSessionFingerprint(req);
+
+    // Create session token with fingerprint
     const { token, jti } = createSessionToken({
       uid: user.id,
       username: user.username,
       role: user.role,
       branchId: user.branchId,
       branchCode: user.branch?.code || null,
+      fingerprint,
     });
 
     // Create session record
@@ -99,10 +195,17 @@ export async function PUT(req: Request) {
       data: {
         userId: user.id,
         tokenJti: jti,
-        ipAddress: req.headers.get("x-forwarded-for") || "unknown",
+        ipAddress: ip || "unknown",
         userAgent: req.headers.get("user-agent") || "unknown",
+        fingerprint,
       },
     });
+
+    // Enforce concurrent session limits
+    await checkConcurrentSessions(user.id);
+
+    // Reset rate limit on successful auth
+    await resetLoginRateLimit(ip, rateLimitKey);
 
     // Set session cookie
     const cookieStore = await cookies();
@@ -124,7 +227,7 @@ export async function PUT(req: Request) {
         method: "webauthn",
         credentialId: result.credentialId,
       },
-      ipAddress: req.headers.get("x-forwarded-for") || undefined,
+      ipAddress: ip,
     });
 
     return NextResponse.json({

@@ -71,26 +71,56 @@ let storageInstance: StorageBackend | null = null;
 
 /**
  * Get or create the storage backend singleton.
+ * Uses dynamic import() for type-safe lazy loading.
+ */
+export async function getStorageBackendAsync(): Promise<StorageBackend> {
+  if (storageInstance) return storageInstance;
+
+  const config = getStorageConfig();
+
+  switch (config.backend) {
+    case "s3": {
+      const { S3StorageBackend } = await import("./storage-s3");
+      storageInstance = new S3StorageBackend(config.s3!);
+      break;
+    }
+
+    case "local":
+    default: {
+      const { LocalStorageBackend } = await import("./storage-local");
+      storageInstance = new LocalStorageBackend(config.local!.basePath);
+      break;
+    }
+  }
+
+  return storageInstance!;
+}
+
+/**
+ * Get or create the storage backend singleton (sync fallback for backward compat).
+ * @deprecated Use getStorageBackendAsync() instead
  */
 export function getStorageBackend(): StorageBackend {
   if (storageInstance) return storageInstance;
 
   const config = getStorageConfig();
 
+  // Synchronous fallback — triggers require() but only for backward compat
   switch (config.backend) {
-    case "s3":
-      // Lazy import to avoid loading AWS SDK when not needed
+    case "s3": {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { S3StorageBackend } = require("./storage-s3");
       storageInstance = new S3StorageBackend(config.s3!);
-      console.log(`[storage] Using S3 backend: ${config.s3!.bucket}`);
       break;
+    }
 
     case "local":
-    default:
+    default: {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { LocalStorageBackend } = require("./storage-local");
       storageInstance = new LocalStorageBackend(config.local!.basePath);
-      console.log(`[storage] Using local filesystem backend`);
       break;
+    }
   }
 
   return storageInstance!;

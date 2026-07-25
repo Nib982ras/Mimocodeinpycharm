@@ -52,12 +52,15 @@ export function createSessionFingerprint(req: Request): string {
 /**
  * Verify that a session fingerprint matches the current request.
  * Returns true if the session is still valid for this client.
+ *
+ * If no fingerprint was stored (legacy session), the check passes
+ * but a new fingerprint will be stored on next login.
  */
 export function verifySessionFingerprint(
   storedFingerprint: string | null,
   req: Request
 ): boolean {
-  if (!storedFingerprint) return true; // No fingerprint stored = not enforced
+  if (!storedFingerprint) return true; // Legacy session — not enforced
   const current = createSessionFingerprint(req);
   return crypto.timingSafeEqual(
     Buffer.from(storedFingerprint, "hex"),
@@ -79,15 +82,17 @@ function normalizeIp(ip: string): string {
 
 /**
  * Normalize User-Agent for fingerprinting.
- * Extracts browser + OS family, ignoring version numbers.
- * This prevents minor updates from invalidating sessions.
+ * Extracts browser family + major version + OS for stronger binding.
+ * Including major version reduces false positives from same browser family.
  */
 function normalizeUserAgent(ua: string): string {
-  // Extract major browser family
+  // Extract browser family + major version
   const browserMatch = ua.match(
-    /(Chrome|Firefox|Safari|Edge|Opera|MSIE|Trident)\/?[\d.]*/i
+    /(Chrome|Firefox|Safari|Edge|Opera|MSIE|Trident)\/(\d+)/i
   );
-  const browser = browserMatch ? browserMatch[1].toLowerCase() : "unknown";
+  const browser = browserMatch
+    ? `${browserMatch[1].toLowerCase()}:${browserMatch[2]}`
+    : "unknown";
 
   // Extract OS family
   const osMatch = ua.match(

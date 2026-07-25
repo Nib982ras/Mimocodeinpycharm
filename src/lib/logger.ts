@@ -39,7 +39,8 @@ const MIN_LEVEL = LOG_LEVELS[CURRENT_LEVEL] ?? LOG_LEVELS.info;
 
 /**
  * Sanitize sensitive fields from log data.
- * Removes passwords, tokens, keys, and other secrets.
+ * Recursively removes passwords, tokens, keys, and other secrets
+ * from nested objects.
  */
 function sanitize(data: Record<string, unknown>): Record<string, unknown> {
   const sensitive = [
@@ -55,15 +56,48 @@ function sanitize(data: Record<string, unknown>): Record<string, unknown> {
     "apiKey",
     "authorization",
     "cookie",
+    "creditCard",
+    "ssn",
+    "nationalId",
+    "taxId",
+    "cvc",
+    "otp",
+    "backupCode",
+    "totpSecret",
+    "encryptedSecret",
   ];
 
   const sanitized = { ...data };
   for (const key of Object.keys(sanitized)) {
     if (sensitive.some((s) => key.toLowerCase().includes(s.toLowerCase()))) {
       sanitized[key] = "[REDACTED]";
+    } else if (typeof sanitized[key] === "object" && sanitized[key] !== null) {
+      // Recursively sanitize nested objects
+      sanitized[key] = sanitizeNested(sanitized[key], sensitive);
     }
   }
   return sanitized;
+}
+
+function sanitizeNested(value: unknown, sensitive: string[]): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeNested(item, sensitive));
+  }
+  if (typeof value === "object" && value !== null) {
+    const obj = value as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(obj)) {
+      if (sensitive.some((s) => key.toLowerCase().includes(s.toLowerCase()))) {
+        result[key] = "[REDACTED]";
+      } else if (typeof obj[key] === "object" && obj[key] !== null) {
+        result[key] = sanitizeNested(obj[key], sensitive);
+      } else {
+        result[key] = obj[key];
+      }
+    }
+    return result;
+  }
+  return value;
 }
 
 /**

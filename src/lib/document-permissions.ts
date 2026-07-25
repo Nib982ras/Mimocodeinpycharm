@@ -114,6 +114,9 @@ export async function checkDocumentPermission(
 
 /**
  * Check if a user or branch has an explicit permission grant.
+ *
+ * Uses nested AND+OR to combine identity filters with expiry checks
+ * without Prisma silently overwriting one OR with the other.
  */
 async function hasExplicitPermission(
   documentId: string,
@@ -121,31 +124,21 @@ async function hasExplicitPermission(
   branchId?: string | null,
   requiredPermission?: PermissionLevel
 ): Promise<boolean> {
-  const where: any = {
-    documentId,
-    revokedAt: null,
-    OR: [],
-  };
-
-  // Check user-specific permissions
-  if (userId) {
-    where.OR.push({ userId });
-  }
-
-  // Check branch-specific permissions
-  if (branchId) {
-    where.OR.push({ branchId });
-  }
-
-  if (where.OR.length === 0) return false;
+  // Build identity conditions (user or branch match)
+  const identityConditions: any[] = [];
+  if (userId) identityConditions.push({ userId });
+  if (branchId) identityConditions.push({ branchId });
+  if (identityConditions.length === 0) return false;
 
   const permissions = await db.documentPermission.findMany({
     where: {
-      ...where,
-      // Check expiry
-      OR: [
-        { expiresAt: null },
-        { expiresAt: { gt: new Date() } },
+      documentId,
+      revokedAt: null,
+      AND: [
+        // Identity match: user OR branch
+        { OR: identityConditions },
+        // Expiry check: not expired
+        { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] },
       ],
     },
   });
@@ -338,7 +331,11 @@ export async function cleanupExpiredPermissions(): Promise<number> {
 // ---------- Visibility helpers ----------
 
 /**
- * Set document visibility.
+ * Set document visibility. Requires ADMIN permission on the document.
+ *
+ * IMPORTANT: This function does NOT enforce access control internally.
+ * Callers MUST verify the caller has ADMIN permission via checkDocumentPermission()
+ * before calling this function.
  */
 export async function setDocumentVisibility(
   documentId: string,
@@ -351,7 +348,14 @@ export async function setDocumentVisibility(
 }
 
 /**
- * Set document expiry.
+ * Set document expiry. Requires ADMIN permission on the document.
+ *
+ * IMPORTANT: This function does NOT enforce access control or max-retention
+ * validation internally. Callers MUST:
+ *   1. Verify the caller has ADMIN permission via checkDocumentPermission()
+ *   2. Validate max retention via setDocumentExpiry() from document-expiry.ts
+ *
+ * Use the version in document-expiry.ts for full validation.
  */
 export async function setDocumentExpiry(
   documentId: string,

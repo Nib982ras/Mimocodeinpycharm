@@ -63,16 +63,21 @@ export async function validateCsrfToken(req: Request): Promise<boolean> {
     return false;
   }
 
-  // Constant-time comparison
+  // Constant-time comparison — pad to equal length to avoid length leakage
   try {
     const cookieBuf = Buffer.from(cookieToken, "hex");
     const headerBuf = Buffer.from(headerToken, "hex");
 
-    if (cookieBuf.length !== headerBuf.length) {
-      return false;
-    }
+    // Pad shorter buffer to match length (constant-time safe)
+    const maxLen = Math.max(cookieBuf.length, headerBuf.length);
+    const a = Buffer.alloc(maxLen, 0);
+    const b = Buffer.alloc(maxLen, 0);
+    cookieBuf.copy(a);
+    headerBuf.copy(b);
 
-    return crypto.timingSafeEqual(cookieBuf, headerBuf);
+    const match = crypto.timingSafeEqual(a, b);
+    // Also verify lengths match (timing-safe via constant-time AND)
+    return match && cookieBuf.length === headerBuf.length;
   } catch {
     return false;
   }

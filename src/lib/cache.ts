@@ -15,6 +15,7 @@
 interface CacheEntry<T> {
   value: T;
   expiresAt: number;
+  lastAccessedAt: number;
   createdAt: number;
   hits: number;
 }
@@ -30,6 +31,7 @@ interface CacheStats {
 
 export class Cache<T = unknown> {
   private store = new Map<string, CacheEntry<T>>();
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
   private stats: CacheStats = {
     hits: 0,
     misses: 0,
@@ -44,7 +46,15 @@ export class Cache<T = unknown> {
     private defaultTtlMs: number = 5 * 60 * 1000 // 5 minutes
   ) {
     // Cleanup expired entries every minute
-    setInterval(() => this.cleanup(), 60 * 1000);
+    this.cleanupTimer = setInterval(() => this.cleanup(), 60 * 1000);
+  }
+
+  /** Release the cleanup timer to prevent memory leaks. */
+  destroy(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
   }
 
   /**
@@ -66,6 +76,8 @@ export class Cache<T = unknown> {
       return undefined;
     }
 
+    // Update last accessed time for true LRU eviction
+    entry.lastAccessedAt = Date.now();
     entry.hits++;
     this.stats.hits++;
     return entry.value;
@@ -80,11 +92,13 @@ export class Cache<T = unknown> {
       this.evict();
     }
 
+    const now = Date.now();
     const ttl = ttlMs ?? this.defaultTtlMs;
     this.store.set(key, {
       value,
-      expiresAt: Date.now() + ttl,
-      createdAt: Date.now(),
+      expiresAt: now + ttl,
+      lastAccessedAt: now,
+      createdAt: now,
       hits: 0,
     });
 
@@ -150,21 +164,21 @@ export class Cache<T = unknown> {
   }
 
   /**
-   * Evict least recently used entry.
+   * Evict least recently accessed entry (true LRU).
    */
   private evict(): void {
-    let oldestKey: string | null = null;
-    let oldestTime = Infinity;
+    let lruKey: string | null = null;
+    let lruTime = Infinity;
 
     for (const [key, entry] of this.store) {
-      if (entry.createdAt < oldestTime) {
-        oldestTime = entry.createdAt;
-        oldestKey = key;
+      if (entry.lastAccessedAt < lruTime) {
+        lruTime = entry.lastAccessedAt;
+        lruKey = key;
       }
     }
 
-    if (oldestKey) {
-      this.store.delete(oldestKey);
+    if (lruKey) {
+      this.store.delete(lruKey);
       this.stats.evictions++;
       this.stats.size--;
     }
@@ -188,12 +202,12 @@ export class Cache<T = unknown> {
 // Application-specific caches
 // ============================================================================
 
-/** System state cache (30 second TTL) */
+/** System state cache (5 second TTL — fast lockdown propagation) */
 export const systemStateCache = new Cache<{
   active: boolean;
   lockdown: boolean;
   lockdownReason: string | null;
-}>(10, 30 * 1000);
+}>(10, 5 * 1000);
 
 /** User session cache (1 minute TTL) */
 export const sessionCache = new Cache<{
@@ -218,6 +232,24 @@ export const dashboardCache = new Cache<unknown>(10, 60 * 1000);
  */
 export function cacheKey(...parts: (string | number | undefined | null)[]): string {
   return parts.filter(Boolean).join(":");
+}
+
+/**
+ * Invalidate all cached session data for a user.
+ * Call this when a user's role, status, or branch changes
+ * to prevent privilege escalation via stale cache.
+ */
+export function invalidateUserSessions(userId: string): void {
+  sessionCache.invalidatePattern(`userId:${userId}`);
+}
+
+/**
+ * Invalidate system state cache immediately.
+ * Call this when system state changes (lockdown, activation)
+ * to avoid waiting for TTL expiry.
+ */
+export function invalidateSystemState(): void {
+  systemStateCache.clear();
 }
 
 /**

@@ -52,6 +52,22 @@ export async function POST(
       return NextResponse.json({ ok: false, error: "User not found" }, { status: 404 });
     }
 
+    // Only OWNER can reset another OWNER's password
+    if (user.role === "OWNER" && admin.role !== "OWNER") {
+      return NextResponse.json(
+        { ok: false, error: "Only the Owner can reset the Owner's password" },
+        { status: 403 }
+      );
+    }
+
+    // SECURITY_ADMIN cannot reset password of equal or higher privilege
+    if (admin.role === "SECURITY_ADMIN" && user.role === "SECURITY_ADMIN") {
+      return NextResponse.json(
+        { ok: false, error: "Cannot reset password of another Security Admin" },
+        { status: 403 }
+      );
+    }
+
     await db.user.update({
       where: { id },
       data: { passwordHash: hashPassword(password) },

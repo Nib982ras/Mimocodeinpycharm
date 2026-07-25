@@ -20,7 +20,6 @@ interface LicensingKey {
 }
 
 let _key: LicensingKey | null = null;
-let _decryptedPrivateKey: string | null = null;
 
 /**
  * Get (or generate on first run) the system's ECDSA licensing key pair.
@@ -68,14 +67,19 @@ function getLicensingKey(): LicensingKey {
 }
 
 /**
- * Get the decrypted licensing private key (cached in memory).
- * This is only decrypted when needed for signing operations.
+ * Get the decrypted licensing private key.
+ * Decrypts per-operation and clears from memory after use to prevent
+ * indefinite exposure in process memory.
  */
-function getDecryptedPrivateKey(): string {
-  if (_decryptedPrivateKey) return _decryptedPrivateKey;
+function withDecryptedPrivateKey<T>(fn: (key: string) => T): T {
   const key = getLicensingKey();
-  _decryptedPrivateKey = decryptPrivateKey(key.encryptedPrivateKeyPem, key.privateKeyIv);
-  return _decryptedPrivateKey;
+  const decrypted = decryptPrivateKey(key.encryptedPrivateKeyPem, key.privateKeyIv);
+  try {
+    return fn(decrypted);
+  } finally {
+    // Clear the decrypted key from memory
+    Buffer.from(decrypted).fill(0);
+  }
 }
 
 /** Public key (PEM) for license signature verification — safe to expose. */
@@ -125,9 +129,10 @@ function payloadBuffer(p: LicensePayload): Buffer {
 
 /** Sign a license payload with the system's ECDSA-P521-SHA512 licensing key. */
 export function signLicense(payload: LicensePayload): string {
-  const privateKeyPem = getDecryptedPrivateKey();
-  const sig = sign(privateKeyPem, payloadBuffer(payload));
-  return sig.toString("base64");
+  return withDecryptedPrivateKey((privateKeyPem) => {
+    const sig = sign(privateKeyPem, payloadBuffer(payload));
+    return sig.toString("base64");
+  });
 }
 
 /** Verify a license signature against the system's licensing public key. */

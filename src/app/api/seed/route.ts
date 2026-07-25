@@ -40,7 +40,21 @@ export async function POST(req: Request) {
     }
 
     const result = await seedDatabase();
-    return NextResponse.json({ ok: true, ...result });
+
+    // In production, NEVER return credentials in the response.
+    // Passwords are logged server-side only.
+    const response: Record<string, unknown> = {
+      ok: true,
+      branches: result.branches,
+      keys: result.keys,
+      seeded: result.seeded,
+    };
+
+    if (result.credentials && process.env.NODE_ENV !== "production") {
+      response.credentials = result.credentials;
+    }
+
+    return NextResponse.json(response);
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json(
@@ -72,7 +86,19 @@ export async function GET(req: Request) {
     }
 
     const result = await seedDatabase();
-    return NextResponse.json({ ok: true, ...result });
+
+    const response: Record<string, unknown> = {
+      ok: true,
+      branches: result.branches,
+      keys: result.keys,
+      seeded: result.seeded,
+    };
+
+    if (result.credentials && process.env.NODE_ENV !== "production") {
+      response.credentials = result.credentials;
+    }
+
+    return NextResponse.json(response);
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json(

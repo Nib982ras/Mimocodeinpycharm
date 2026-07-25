@@ -33,6 +33,20 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# secrets & cryptographic material — NEVER commit
+db/.master-key
+db/.session-secret
+db/.licensing-key.json
+
+# data directories — NEVER commit
+db/vault/
+db/backups/
+db/temp/
+
+# legacy
+*.log
+*.db
+
 # vercel
 .vercel
 

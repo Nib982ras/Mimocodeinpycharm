@@ -95,6 +95,14 @@ export function withErrorHandling<T>(
         return errorResponse(err.message, 429, "RATE_LIMITED");
       }
 
+      if (err instanceof ForbiddenError) {
+        return errorResponse(err.message, 403, "FORBIDDEN");
+      }
+
+      if (err instanceof BadRequestError) {
+        return errorResponse(err.message, 400, "BAD_REQUEST");
+      }
+
       if (err instanceof TimeoutError) {
         return errorResponse("Request timed out", 504, "TIMEOUT");
       }

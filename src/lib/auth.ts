@@ -1,6 +1,4 @@
 import crypto from "crypto";
-import fs from "fs";
-import path from "path";
 import { cookies } from "next/headers";
 import { db } from "@/lib/db";
 
@@ -27,7 +25,6 @@ import { db } from "@/lib/db";
 
 export const SESSION_COOKIE = "secure-exchange-session";
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60; // 7 days, in seconds
-const SECRET_PATH = path.join(process.cwd(), "db", ".session-secret");
 
 // Role rank for hierarchy checks (higher = more authority).
 export const ROLE_RANK: Record<string, number> = {
@@ -40,13 +37,38 @@ export const ROLE_RANK: Record<string, number> = {
 
 export type Role = "OWNER" | "SECURITY_ADMIN" | "BRANCH_ADMIN" | "USER" | "READONLY";
 
+/**
+ * Retrieve the session signing secret (HMAC-SHA256 key).
+ *
+ * Priority:
+ *   1. SESSION_SECRET environment variable (REQUIRED in production)
+ *   2. Auto-generated ephemeral key (development only)
+ *
+ * In production, set SESSION_SECRET via your secrets manager:
+ *   node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+ */
+let _sessionSecret: string | null = null;
+
 function getSecret(): string {
-  if (!fs.existsSync(SECRET_PATH)) {
-    const key = crypto.randomBytes(32).toString("hex");
-    fs.mkdirSync(path.dirname(SECRET_PATH), { recursive: true });
-    fs.writeFileSync(SECRET_PATH, key, { mode: 0o600 });
+  if (_sessionSecret) return _sessionSecret;
+
+  const envSecret = process.env.SESSION_SECRET;
+  if (envSecret) {
+    _sessionSecret = envSecret.trim();
+    return _sessionSecret;
   }
-  return fs.readFileSync(SECRET_PATH, "utf8").trim();
+
+  // Development-only fallback: ephemeral key (not persisted)
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "SESSION_SECRET environment variable is required in production. " +
+      "Generate one with: node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+    );
+  }
+
+  console.warn("[auth] WARNING: Using ephemeral session secret — all sessions will be invalidated on restart. Set SESSION_SECRET for persistence.");
+  _sessionSecret = crypto.randomBytes(32).toString("hex");
+  return _sessionSecret;
 }
 
 // ---------- Password hashing (scrypt) ----------

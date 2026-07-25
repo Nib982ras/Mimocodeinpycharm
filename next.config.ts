@@ -19,9 +19,9 @@ const nextConfig: NextConfig = {
   // Strict mode for better error detection in development
   reactStrictMode: true,
 
-  // TypeScript strict mode — allow errors for now (migration in progress)
+  // TypeScript strict mode — enforce type safety
   typescript: {
-    ignoreBuildErrors: true,
+    ignoreBuildErrors: false,
   },
 
   // Body size limit: 100MB for file uploads (matches body-size-limit.ts)

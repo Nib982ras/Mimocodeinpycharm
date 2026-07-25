@@ -251,17 +251,31 @@ export async function redisSetNx(
 }
 
 /**
- * Get all keys matching a pattern.
+ * Get all keys matching a pattern (production-safe via SCAN).
  */
 export async function redisKeys(pattern: string): Promise<string[]> {
   const redis = getRedis();
   if (!redis) return [];
 
   try {
-    // Remove key prefix for pattern matching
     const prefix = process.env.REDIS_KEY_PREFIX || "secure_exchange:";
     const fullPattern = prefix + pattern;
-    const keys = await redis.keys(fullPattern);
+    const keys: string[] = [];
+    let cursor = "0";
+
+    // Use SCAN instead of KEYS for production safety (O(1) per iteration)
+    do {
+      const [nextCursor, batch] = await redis.scan(
+        cursor,
+        "MATCH",
+        fullPattern,
+        "COUNT",
+        100
+      );
+      cursor = nextCursor;
+      keys.push(...batch);
+    } while (cursor !== "0");
+
     // Remove prefix from results
     return keys.map((key) => key.slice(prefix.length));
   } catch {
@@ -270,7 +284,7 @@ export async function redisKeys(pattern: string): Promise<string[]> {
 }
 
 /**
- * Delete all keys matching a pattern.
+ * Delete all keys matching a pattern (production-safe via SCAN).
  */
 export async function redisDelPattern(pattern: string): Promise<number> {
   const redis = getRedis();
@@ -279,13 +293,29 @@ export async function redisDelPattern(pattern: string): Promise<number> {
   try {
     const prefix = process.env.REDIS_KEY_PREFIX || "secure_exchange:";
     const fullPattern = prefix + pattern;
-    const keys = await redis.keys(fullPattern);
-    if (keys.length === 0) return 0;
+    let deleted = 0;
+    let cursor = "0";
 
-    const pipeline = redis.pipeline();
-    keys.forEach((key) => pipeline.del(key));
-    await pipeline.exec();
-    return keys.length;
+    // Use SCAN instead of KEYS for production safety
+    do {
+      const [nextCursor, batch] = await redis.scan(
+        cursor,
+        "MATCH",
+        fullPattern,
+        "COUNT",
+        100
+      );
+      cursor = nextCursor;
+
+      if (batch.length > 0) {
+        const pipeline = redis.pipeline();
+        batch.forEach((key) => pipeline.del(key));
+        await pipeline.exec();
+        deleted += batch.length;
+      }
+    } while (cursor !== "0");
+
+    return deleted;
   } catch {
     return 0;
   }

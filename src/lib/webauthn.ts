@@ -19,7 +19,24 @@ import { db } from "@/lib/db";
 
 const RP_NAME = "Secure Document Exchange";
 const RP_ID = process.env.WEBAUTHN_RP_ID || "localhost";
-const ORIGIN = process.env.WEBAUTHN_ORIGIN || `http://localhost:3000`;
+
+function getOrigin(): string {
+  const origin = process.env.WEBAUTHN_ORIGIN;
+  if (origin) {
+    // In production, enforce HTTPS
+    if (process.env.NODE_ENV === "production" && !origin.startsWith("https://")) {
+      throw new Error(
+        "WEBAUTHN_ORIGIN must use HTTPS in production. " +
+        "WebAuthn requires a secure context (HTTPS) except on localhost."
+      );
+    }
+    return origin;
+  }
+  // Development default only
+  return `http://localhost:3000`;
+}
+
+const ORIGIN = getOrigin();
 
 // ---------- Registration ----------
 
@@ -49,7 +66,7 @@ export async function startRegistration(
     })),
     authenticatorSelection: {
       residentKey: "preferred",
-      userVerification: "preferred",
+      userVerification: "required",
     },
   });
 
@@ -131,7 +148,7 @@ export async function startAuthentication(username?: string) {
 
   const options = await generateAuthenticationOptions({
     rpID: RP_ID,
-    userVerification: "preferred",
+    userVerification: "required",
     allowCredentials,
   });
 

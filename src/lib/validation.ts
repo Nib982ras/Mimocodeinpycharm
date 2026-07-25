@@ -67,14 +67,18 @@ export function isEmail(value: unknown, field: string): string | ValidationError
 }
 
 /**
- * Validate that a value is a valid URL.
+ * Validate that a value is a valid URL (http/https only).
+ * Restricts schemes to prevent javascript:, data:, file: SSRF/XSS.
  */
 export function isUrl(value: unknown, field: string): string | ValidationError {
   const result = isString(value, field);
   if (typeof result === "object") return result;
 
   try {
-    new URL(result);
+    const url = new URL(result);
+    if (!["http:", "https:"].includes(url.protocol)) {
+      return { field, message: `${field} must be an HTTP or HTTPS URL` };
+    }
     return result;
   } catch {
     return { field, message: `${field} must be a valid URL` };
@@ -106,8 +110,8 @@ export function isNumber(
 ): number | ValidationError {
   const num = typeof value === "number" ? value : Number(value);
 
-  if (isNaN(num)) {
-    return { field, message: `${field} must be a number` };
+  if (isNaN(num) || !isFinite(num)) {
+    return { field, message: `${field} must be a finite number` };
   }
 
   if (min !== undefined && num < min) {
@@ -299,13 +303,14 @@ export function sanitizeFilename(filename: string): string {
 }
 
 /**
- * Sanitize a URL path.
+ * Sanitize a URL path. Prevents directory traversal and null byte injection.
  */
 export function sanitizePath(path: string): string {
   return path
-    .replace(/\.\./g, "")
-    .replace(/\/\//g, "/")
-    .replace(/[^a-zA-Z0-9/._-]/g, "");
+    .replace(/\0/g, "")           // Remove null bytes (OS path truncation attack)
+    .replace(/\.\./g, "")         // Remove directory traversal
+    .replace(/\/\//g, "/")        // Collapse double slashes
+    .replace(/[^a-zA-Z0-9/._-]/g, ""); // Restrict charset
 }
 
 /**
