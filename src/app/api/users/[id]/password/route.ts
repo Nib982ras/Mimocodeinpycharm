@@ -5,7 +5,16 @@ import { recordAudit } from "@/lib/audit";
 
 export const dynamic = "force-dynamic";
 
-/** POST /api/users/[id]/password — reset a user's password (SECURITY_ADMIN+). */
+/**
+ * POST /api/users/[id]/password — reset a user's password (SECURITY_ADMIN+).
+ *
+ * Password policy:
+ *   - Minimum 12 characters
+ *   - At least one uppercase letter
+ *   - At least one lowercase letter
+ *   - At least one digit
+ *   - At least one special character (!@#$%^&*)
+ */
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -16,9 +25,24 @@ export async function POST(
     const body = await req.json().catch(() => ({}));
     const { password } = body as { password?: string };
 
-    if (!password || password.length < 4) {
+    if (!password) {
       return NextResponse.json(
-        { ok: false, error: "Password must be at least 4 characters" },
+        { ok: false, error: "Password is required" },
+        { status: 400 }
+      );
+    }
+
+    // Enforce password policy
+    const errors: string[] = [];
+    if (password.length < 12) errors.push("at least 12 characters");
+    if (!/[A-Z]/.test(password)) errors.push("at least one uppercase letter");
+    if (!/[a-z]/.test(password)) errors.push("at least one lowercase letter");
+    if (!/[0-9]/.test(password)) errors.push("at least one digit");
+    if (!/[!@#$%^&*]/.test(password)) errors.push("at least one special character (!@#$%^&*)");
+
+    if (errors.length > 0) {
+      return NextResponse.json(
+        { ok: false, error: `Password must contain ${errors.join(", ")}` },
         { status: 400 }
       );
     }
@@ -33,12 +57,18 @@ export async function POST(
       data: { passwordHash: hashPassword(password) },
     });
 
+    // Revoke all active sessions for the target user so they must re-login
+    await db.session.updateMany({
+      where: { userId: id, revoked: false },
+      data: { revoked: true, revokedAt: new Date() },
+    });
+
     await recordAudit({
-      action: "SYSTEM",
+      action: "PASSWORD_RESET",
       actor: admin.username,
+      actorId: admin.id,
       status: "SUCCESS",
-      details: { event: "PASSWORD_RESET", target: user.username },
-      ipAddress: req.headers.get("x-forwarded-for") || undefined,
+      details: { target: user.username },
     });
 
     return NextResponse.json({ ok: true });

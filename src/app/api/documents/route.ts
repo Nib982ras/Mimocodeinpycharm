@@ -5,13 +5,20 @@ import { storeCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
 import { requireUser, requireSystemActive, authErrorResponse, ROLE_RANK } from "@/lib/auth";
+import { checkBodySize } from "@/lib/body-size-limit";
+import { parsePagination, buildIdCursorWhere, simplePaginatedResponse } from "@/lib/pagination";
 import { randomUUID } from "crypto";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/documents — list documents visible to the current user.
- *  - USER/READONLY/BRANCH_ADMIN: only documents sent by / received by their branch
- *  - SECURITY_ADMIN+/OWNER: all documents (optionally filtered by branchId/direction)
+/** Maximum file size: 100MB (must match body-size-limit.ts) */
+const MAX_FILE_SIZE = 100 * 1024 * 1024;
+
+/** GET /api/documents — paginated list of documents visible to the current user.
+ *  Query params: cursor, limit (default 50, max 200), branchId, direction
  */
 export async function GET(req: Request) {
   try {
@@ -19,20 +26,19 @@ export async function GET(req: Request) {
     const url = new URL(req.url);
     const branchId = url.searchParams.get("branchId");
     const direction = url.searchParams.get("direction"); // "sent" | "received"
+    const pagination = parsePagination(url);
 
     const isAdmin = ROLE_RANK[session.role] >= ROLE_RANK.SECURITY_ADMIN;
     const where: Record<string, unknown> = {};
     if (isAdmin) {
-      // Security admin / owner can view everything; optional filter.
       if (branchId && direction === "sent") where.senderBranchId = branchId;
       else if (branchId && direction === "received") where.recipientBranchId = branchId;
       else if (branchId) {
         where.OR = [{ senderBranchId: branchId }, { recipientBranchId: branchId }];
       }
     } else {
-      // Regular users only see docs involving their own branch.
       if (!session.branchId) {
-        return NextResponse.json({ ok: true, documents: [] });
+        return NextResponse.json({ ok: true, documents: [], pagination: { nextCursor: null, hasMore: false, limit: pagination.limit, count: 0 } });
       }
       if (direction === "sent") where.senderBranchId = session.branchId;
       else if (direction === "received") where.recipientBranchId = session.branchId;
@@ -44,33 +50,36 @@ export async function GET(req: Request) {
       }
     }
 
+    // Apply cursor-based pagination
+    const paginatedWhere = buildIdCursorWhere(where, pagination);
+
+    // Fetch limit + 1 to detect if there are more items
     const documents = await db.document.findMany({
-      where,
+      where: paginatedWhere,
       orderBy: { createdAt: "desc" },
-      take: 100,
+      take: pagination.limit + 1,
       include: {
         senderBranch: { select: { id: true, code: true, name: true } },
         recipientBranch: { select: { id: true, code: true, name: true } },
       },
     });
 
-    return NextResponse.json({
-      ok: true,
-      documents: documents.map((d) => ({
-        id: d.id,
-        name: d.name,
-        mimeType: d.mimeType,
-        originalSize: d.originalSize,
-        status: d.status,
-        packageVersion: d.packageVersion,
-        documentHash: d.documentHash,
-        nonce: d.nonce,
-        sender: d.senderBranch,
-        recipient: d.recipientBranch,
-        createdAt: d.createdAt.toISOString(),
-        decryptedAt: d.decryptedAt?.toISOString() ?? null,
-      })),
-    });
+    const result = simplePaginatedResponse(documents, pagination, undefined, (d) => ({
+      id: d.id,
+      name: d.name,
+      mimeType: d.mimeType,
+      originalSize: d.originalSize,
+      status: d.status,
+      packageVersion: d.packageVersion,
+      documentHash: d.documentHash,
+      nonce: d.nonce,
+      sender: d.senderBranch,
+      recipient: d.recipientBranch,
+      createdAt: d.createdAt.toISOString(),
+      decryptedAt: d.decryptedAt?.toISOString() ?? null,
+    }));
+
+    return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Failed to list documents" }, { status: 500 });
@@ -78,12 +87,20 @@ export async function GET(req: Request) {
 }
 
 /** POST /api/documents — encrypt and store a document for a recipient.
+ *  - Enforces body size limit before processing
+ *  - Streams upload to a temp file to avoid memory exhaustion
  *  - READONLY: rejected outright (403).
- *  - USER/BRANCH_ADMIN: sender is forced to the user's branch (the form's senderBranchId is ignored).
- *  - SECURITY_ADMIN+/OWNER: may pick any sender branch (must have an active signing key).
+ *  - USER/BRANCH_ADMIN: sender is forced to the user's branch.
+ *  - SECURITY_ADMIN+/OWNER: may pick any sender branch.
  *  Enforces system-active + lockdown rules via requireSystemActive() (owner bypasses).
  */
 export async function POST(req: Request) {
+  // Enforce body size limit BEFORE reading the body
+  const sizeError = checkBodySize(req);
+  if (sizeError) return sizeError;
+
+  let tempFilePath: string | null = null;
+
   try {
     const session = await requireSystemActive();
 
@@ -103,6 +120,14 @@ export async function POST(req: Request) {
       return NextResponse.json(
         { ok: false, error: "file and recipientBranchId are required" },
         { status: 400 }
+      );
+    }
+
+    // Secondary check: verify actual file size after formData parse
+    if (file.size > MAX_FILE_SIZE) {
+      return NextResponse.json(
+        { ok: false, error: `File exceeds maximum size of ${MAX_FILE_SIZE / 1024 / 1024}MB` },
+        { status: 413 }
       );
     }
 
@@ -145,9 +170,40 @@ export async function POST(req: Request) {
     // Recover the sender's signing private key from the (master-key-encrypted) store.
     const senderPrivPem = decryptPrivateKey(senderKey.encryptedPrivateKey, senderKey.privateIv);
 
-    // Read the uploaded file into memory (reference build; large files would stream).
-    const arrayBuffer = await file.arrayBuffer();
-    const plaintext = Buffer.from(arrayBuffer);
+    // Stream upload to a temp file instead of buffering entire file in memory.
+    // This prevents OOM crashes for large files.
+    tempFilePath = path.join(os.tmpdir(), `doc-upload-${randomUUID()}`);
+    const writeStream = fs.createWriteStream(tempFilePath);
+
+    const reader = file.stream().getReader();
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.length;
+        // Abort if file grew beyond limit during streaming (defense-in-depth)
+        if (totalBytes > MAX_FILE_SIZE) {
+          writeStream.destroy();
+          fs.unlinkSync(tempFilePath);
+          tempFilePath = null;
+          return NextResponse.json(
+            { ok: false, error: `File exceeds maximum size of ${MAX_FILE_SIZE / 1024 / 1024}MB` },
+            { status: 413 }
+          );
+        }
+        writeStream.write(value);
+      }
+    } finally {
+      writeStream.end();
+    }
+
+    // Read the plaintext from the temp file (already validated size, so this is safe)
+    const plaintext = fs.readFileSync(tempFilePath);
+
+    // Clean up temp file immediately after reading
+    fs.unlinkSync(tempFilePath);
+    tempFilePath = null;
 
     // Run the full hybrid encryption workflow.
     const enc = encryptDocument(plaintext, senderPrivPem, recipientKey.publicKeyPem);
@@ -226,6 +282,10 @@ export async function POST(req: Request) {
       },
     });
   } catch (err) {
+    // Clean up temp file on error
+    if (tempFilePath) {
+      try { fs.unlinkSync(tempFilePath); } catch { /* ignore cleanup error */ }
+    }
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Failed to encrypt document" }, { status: 500 });
   }

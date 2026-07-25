@@ -7,32 +7,28 @@ import {
   getSystemState,
   authErrorResponse,
 } from "@/lib/auth";
-import { recordAudit, clientIp } from "@/lib/audit";
+import { recordAudit } from "@/lib/audit";
 import { verifyTotp, verifyBackupCode } from "@/lib/totp";
 import { decryptPrivateKey } from "@/lib/crypto";
+import {
+  checkLoginRateLimit,
+  recordLoginFailure,
+  resetLoginRateLimit,
+  getClientIp,
+} from "@/lib/rate-limit";
+import {
+  createSessionFingerprint,
+  checkConcurrentSessions,
+} from "@/lib/session-security";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST /api/auth/login — two-step authentication with optional 2FA.
  *
- * Step 1: client submits `{ username, password }`.
- *   - If credentials are valid AND the user has no enabled 2FA → session set,
- *     returns `{ ok: true, user }`.
- *   - If credentials are valid AND the user has 2FA enabled → returns
- *     `{ ok: false, requiresTwoFactor: true }` WITHOUT setting a cookie. The
- *     frontend prompts for a 6-digit code or backup code and resubmits the
- *     full triple `{ username, password, totpCode? | backupCode? }`.
- *
- * Step 2: the same endpoint verifies the 2FA factor, then sets the session.
- *
- * Security properties:
- *  - Constant-time password verification (always runs scrypt even when the
- *    user doesn't exist) to prevent user enumeration.
- *  - 2FA failures are audited with status=FAILURE but the user is not told
- *    which factor was wrong (only "Invalid 2FA code").
- *  - System deactivation / lockdown block all non-OWNER logins.
- *  - Suspended/revoked accounts cannot log in (403 with the status name).
+ * Rate limited: 5 attempts per 15 minutes per IP AND per username.
+ * Dual tracking prevents distributed brute force across multiple IPs.
+ * Progressive lockout doubles block duration on repeated violations.
  */
 export async function POST(req: Request) {
   try {
@@ -51,9 +47,31 @@ export async function POST(req: Request) {
       );
     }
 
-    const uname = username.toLowerCase();
-    const ip = clientIp(req);
+    const ip = getClientIp(req);
     const ua = req.headers.get("user-agent") || undefined;
+    const uname = username.toLowerCase();
+
+    // Dual rate limiting: check both IP and username
+    const rateLimit = await checkLoginRateLimit(ip, uname);
+
+    if (!rateLimit.allowed) {
+      await recordAudit({
+        action: "LOGIN_FAILED",
+        actor: uname,
+        status: "FAILURE",
+        details: { reason: "RATE_LIMITED", blockedBy: rateLimit.blockedBy },
+        ipAddress: ip,
+      });
+      return NextResponse.json(
+        { ok: false, error: "Too many login attempts. Please try again later." },
+        {
+          status: 429,
+          headers: rateLimit.retryAfter
+            ? { "Retry-After": String(rateLimit.retryAfter) }
+            : {},
+        }
+      );
+    }
 
     const user = await db.user.findUnique({
       where: { username: uname },
@@ -69,6 +87,9 @@ export async function POST(req: Request) {
       : verifyPassword(password, "00:00");
 
     if (!user || !passwordOk) {
+      // Record failure for both IP and username
+      await recordLoginFailure(ip, uname);
+
       await recordAudit({
         action: "LOGIN_FAILED",
         actor: uname,
@@ -82,8 +103,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // Account status check (only on valid credentials — otherwise we'd leak
-    // status info to an attacker who doesn't know the password).
+    // Account status check
     if (user.status !== "ACTIVE") {
       await recordAudit({
         action: "LOGIN_FAILED",
@@ -99,8 +119,7 @@ export async function POST(req: Request) {
       );
     }
 
-    // System-wide guards. The owner always bypasses deactivation/lockdown so
-    // they can recover a frozen system.
+    // System-wide guards
     const state = await getSystemState();
     if (user.role !== "OWNER") {
       if (!state.active) {
@@ -133,12 +152,11 @@ export async function POST(req: Request) {
       }
     }
 
-    // 2FA enforcement.
+    // 2FA enforcement
     const tf = user.twoFactor;
     if (tf && tf.enabled) {
       const hasFactor = totpCode || backupCode;
       if (!hasFactor) {
-        // Don't set cookie yet — client must collect a 2FA factor and re-submit.
         return NextResponse.json({ ok: false, requiresTwoFactor: true });
       }
 
@@ -169,6 +187,8 @@ export async function POST(req: Request) {
       }
 
       if (!factorOk) {
+        await recordLoginFailure(ip, uname);
+
         await recordAudit({
           action: "2FA_FAIL",
           actor: user.username,
@@ -183,7 +203,7 @@ export async function POST(req: Request) {
         );
       }
 
-      // Backup codes are single-use — burn the consumed hash.
+      // Burn used backup code
       if (usedBackupIndex >= 0) {
         let hashes: string[] = [];
         try {
@@ -208,13 +228,21 @@ export async function POST(req: Request) {
       });
     }
 
-    // Issue the session.
+    // Success — reset rate limits for this IP and username
+    await resetLoginRateLimit(ip, uname);
+
+    // Enforce maximum concurrent sessions
+    await checkConcurrentSessions(user.id);
+
+    // Create session with fingerprint
+    const fingerprint = createSessionFingerprint(req);
     const { token, jti } = createSessionToken({
       uid: user.id,
       username: user.username,
       role: user.role,
       branchId: user.branchId,
       branchCode: user.branch?.code ?? null,
+      fingerprint,
     });
 
     await db.session.create({
@@ -223,6 +251,7 @@ export async function POST(req: Request) {
         tokenJti: jti,
         ipAddress: ip ?? null,
         userAgent: ua ?? null,
+        fingerprint,
       },
     });
 
@@ -234,7 +263,7 @@ export async function POST(req: Request) {
       actorId: user.id,
       branchId: user.branchId ?? undefined,
       status: "SUCCESS",
-      details: { role: user.role, jti },
+      details: { role: user.role, jti, fingerprint: fingerprint.substring(0, 8) + "..." },
       ipAddress: ip,
     });
 

@@ -5,6 +5,10 @@ import { readCiphertext } from "@/lib/storage";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
 import { requireSystemActive, authErrorResponse, ROLE_RANK } from "@/lib/auth";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { randomUUID } from "crypto";
 
 export const dynamic = "force-dynamic";
 
@@ -75,6 +79,9 @@ export async function POST(
     );
   }
 
+  // Write decrypted plaintext to a temp file to avoid holding it all in memory for the response
+  let tempFilePath: string | null = null;
+
   try {
     // Recipient's encryption private key (stored encrypted at rest).
     const recipientPrivPem = decryptPrivateKey(
@@ -99,6 +106,10 @@ export async function POST(
       senderPubPem,
       doc.documentHash
     );
+
+    // Write plaintext to temp file for streaming response
+    tempFilePath = path.join(os.tmpdir(), `doc-decrypt-${randomUUID()}`);
+    fs.writeFileSync(tempFilePath, result.plaintext);
 
     await db.document.update({
       where: { id },
@@ -134,12 +145,22 @@ export async function POST(
       },
     });
 
-    // Return the file plus verification metadata in headers.
-    return new NextResponse(result.plaintext, {
+    // Sanitize filename for Content-Disposition header
+    const safeFilename = doc.name
+      .replace(/[^a-zA-Z0-9._-]/g, "_")
+      .replace(/_{2,}/g, "_")
+      .slice(0, 255);
+
+    // Stream the file from disk to avoid holding plaintext in memory for the response
+    const fileBuffer = fs.readFileSync(tempFilePath);
+    fs.unlinkSync(tempFilePath);
+    tempFilePath = null;
+
+    return new NextResponse(new Uint8Array(fileBuffer), {
       status: 200,
       headers: {
         "Content-Type": doc.mimeType || "application/octet-stream",
-        "Content-Disposition": `attachment; filename="${encodeURIComponent(doc.name)}"`,
+        "Content-Disposition": `attachment; filename="${safeFilename}"`,
         "X-Signature-Valid": String(result.signatureValid),
         "X-Document-Hash-Valid": String(result.documentHashValid),
         "X-Document-Hash": result.documentHash,
@@ -147,6 +168,10 @@ export async function POST(
       },
     });
   } catch (err) {
+    // Clean up temp file on error
+    if (tempFilePath) {
+      try { fs.unlinkSync(tempFilePath); } catch { /* ignore */ }
+    }
     const message = err instanceof Error ? err.message : "Decryption failed";
     await recordAudit({
       action: "DOWNLOAD",
@@ -156,8 +181,9 @@ export async function POST(
       status: "FAILURE",
       details: { error: message, fileName: doc.name },
     });
+    console.error("Decryption error:", err);
     return NextResponse.json(
-      { ok: false, error: message, hint: "This may indicate tampering or a key mismatch." },
+      { ok: false, error: "Decryption failed", hint: "Document may be tampered or keys mismatched" },
       { status: 500 }
     );
   }

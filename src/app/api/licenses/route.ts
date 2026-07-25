@@ -8,15 +8,31 @@ import {
   getLicensingFingerprint,
   type LicensePayload,
 } from "@/lib/licensing";
+import { parsePagination, buildIdCursorWhere, simplePaginatedResponse } from "@/lib/pagination";
 
 export const dynamic = "force-dynamic";
 
-/** GET /api/licenses — list every license with its device + owner (SECURITY_ADMIN+). */
-export async function GET() {
+/** GET /api/licenses — paginated list of licenses (SECURITY_ADMIN+).
+ *  Query params: cursor, limit (default 50, max 200), status, tier
+ */
+export async function GET(req: Request) {
   try {
     const me = await requireSecurityAdmin();
+    const url = new URL(req.url);
+    const pagination = parsePagination(url);
+    const statusFilter = url.searchParams.get("status");
+    const tierFilter = url.searchParams.get("tier");
+
+    const where: Record<string, unknown> = {};
+    if (statusFilter) where.status = statusFilter;
+    if (tierFilter) where.tier = tierFilter;
+
+    const paginatedWhere = buildIdCursorWhere(where, pagination);
+
     const licenses = await db.license.findMany({
+      where: paginatedWhere,
       orderBy: { issuedAt: "desc" },
+      take: pagination.limit + 1,
       include: {
         device: {
           select: {
@@ -32,31 +48,29 @@ export async function GET() {
       },
     });
 
-    return NextResponse.json({
-      ok: true,
-      actor: me.username,
-      licenses: licenses.map((l) => ({
-        id: l.id,
-        licenseKey: l.licenseKey,
-        status: l.status,
-        tier: l.tier,
-        issuedAt: l.issuedAt.toISOString(),
-        expiresAt: l.expiresAt.toISOString(),
-        revokedAt: l.revokedAt?.toISOString() ?? null,
-        revokedBy: l.revokedBy,
-        revokeReason: l.revokeReason,
-        signerFingerprint: l.signerFingerprint,
-        device: l.device
-          ? {
-              id: l.device.id,
-              name: l.device.name,
-              fingerprint: l.device.fingerprint,
-              status: l.device.status,
-              owner: l.device.user,
-            }
-          : null,
-      })),
-    });
+    const result = simplePaginatedResponse(licenses, pagination, undefined, (l) => ({
+      id: l.id,
+      licenseKey: l.licenseKey,
+      status: l.status,
+      tier: l.tier,
+      issuedAt: l.issuedAt.toISOString(),
+      expiresAt: l.expiresAt.toISOString(),
+      revokedAt: l.revokedAt?.toISOString() ?? null,
+      revokedBy: l.revokedBy,
+      revokeReason: l.revokeReason,
+      signerFingerprint: l.signerFingerprint,
+      device: l.device
+        ? {
+            id: l.device.id,
+            name: l.device.name,
+            fingerprint: l.device.fingerprint,
+            status: l.device.status,
+            owner: l.device.user,
+          }
+        : null,
+    }));
+
+    return NextResponse.json({ ok: true, actor: me.username, ...result });
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Failed to list licenses" }, { status: 500 });

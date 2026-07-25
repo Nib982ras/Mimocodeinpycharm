@@ -46,6 +46,7 @@ model Branch {
   receivedDocs Document[] @relation("RecipientDocs")
   auditLogs   AuditLog[]
   users       User[]
+  messages    Message[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -70,12 +71,15 @@ model User {
   sessions        Session[]
   devices         Device[]
   auditLogs       AuditLog[] @relation("ActorAuditLogs")
+  messagesSent    Message[] @relation("MessagesSent")
+  messagesReceived Message[] @relation("MessagesReceived")
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 
   @@index([branchId])
   @@index([role])
   @@index([status])
+  @@index([username, status])            // Login lookup
 }
 
 // TOTP two-factor credentials. Secret encrypted at rest with the master key.
@@ -97,18 +101,22 @@ model TwoFactor {
 // When a user is suspended or the system locks down, all their sessions are
 // marked revoked so their cookie token is rejected.
 model Session {
-  id        String   @id @default(cuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenJti  String   @unique // unique session id embedded in the JWT
-  ipAddress String?
-  userAgent String?
-  revoked   Boolean  @default(false)
-  createdAt DateTime @default(now())
-  revokedAt DateTime?
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenJti    String   @unique // unique session id embedded in the JWT
+  ipAddress   String?
+  userAgent   String?
+  fingerprint String?  // SHA-256 of (IP + User-Agent) for session binding
+  revoked     Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  revokedAt   DateTime?
 
   @@index([userId])
   @@index([revoked])
+  @@index([userId, revoked])              // Active session count per user
+  @@index([createdAt])                    // Stale session cleanup
+  @@index([revoked, createdAt])           // Revoked session cleanup
 }
 
 // Authorized device/installation. Each device has its own ECC key pair; the
@@ -179,6 +187,7 @@ model Key {
   receivedDocuments  Document[] @relation("RecipientKeyDocs")
 
   @@index([branchId, purpose])
+  @@index([branchId, status, purpose]) // Active key lookup per branch
   @@index([status])
 }
 
@@ -215,6 +224,9 @@ model Document {
   @@index([senderBranchId])
   @@index([recipientBranchId])
   @@index([createdAt])
+  @@index([senderBranchId, createdAt])     // Sent docs listing per branch
+  @@index([recipientBranchId, createdAt])  // Received docs listing per branch
+  @@index([status, createdAt])             // Status-filtered queries
 }
 
 // Immutable audit trail. Each row is append-only; no UPDATE path is used.
@@ -226,6 +238,7 @@ model AuditLog {
                        // | LOCKDOWN | LOCKDOWN_RELEASE | USER_SUSPEND | USER_REACTIVATE
                        // | USER_REVOKE | DEVICE_REGISTER | DEVICE_REVOKE | LICENSE_ISSUE
                        // | LICENSE_REVOKE | LICENSE_VALIDATE | UNAUTHORIZED
+                       // | MESSAGE_SEND | MESSAGE_READ | MESSAGE_DELETE
   actor       String   // username or "SYSTEM"
   actorId     String?
   actorUser   User?    @relation("ActorAuditLogs", fields: [actorId], references: [id], onDelete: SetNull)
@@ -242,4 +255,51 @@ model AuditLog {
   @@index([createdAt])
   @@index([branchId])
   @@index([actorId])
+  @@index([action, createdAt])           // Filtered audit queries
+  @@index([branchId, createdAt])         // Branch-specific audit listing
+  @@index([actorId, createdAt])          // Actor-specific audit listing
+  @@index([status, createdAt])           // Status-filtered queries
+  @@index([documentId])                  // Document audit trail
+}
+
+// Real-time messaging between users. Supports group chats by branch.
+// Each message is immutable (no edits/deletes); soft deletion via status.
+model Message {
+  id            String   @id @default(cuid())
+  fromUserId    String
+  fromUser      User     @relation("MessagesSent", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUserId      String?  // null = broadcast to entire branch
+  toUser        User?    @relation("MessagesReceived", fields: [toUserId], references: [id], onDelete: Cascade)
+  branchId      String   // branch context (where message originates)
+  branch        Branch   @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  text          String
+  status        String   @default("SENT") // SENT | READ | DELETED
+  readAt        DateTime?
+  deletedAt     DateTime?
+  createdAt     DateTime @default(now())
+
+  @@index([fromUserId])
+  @@index([toUserId])
+  @@index([branchId])
+  @@index([createdAt])
+  @@index([status])
+}
+
+// Persistent rate limit and brute-force tracking.
+// Replaces the in-memory Map with database-backed storage that survives restarts
+// and works across multiple instances. Cleaned up periodically.
+model RateLimitAttempt {
+  id          String   @id @default(cuid())
+  key         String   // e.g. "ip:192.168.1.1" or "user:admin"
+  action      String   // LOGIN | API | SEED | etc.
+  count       Int      @default(1)
+  windowStart DateTime @default(now())
+  blockedUntil DateTime? // set when threshold exceeded
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([key, action])
+  @@index([key, action])
+  @@index([blockedUntil])
+  @@index([windowStart])
 }

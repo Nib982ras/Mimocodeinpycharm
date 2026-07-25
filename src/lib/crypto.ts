@@ -124,18 +124,18 @@ function base64UrlToBuffer(b64url: string): Buffer {
   return Buffer.from(b64url + pad, "base64");
 }
 
-/** HKDF-SHA256 key derivation from a shared secret. */
+/** HKDF-SHA256 key derivation from a shared secret.
+ *  Uses Node.js built-in crypto.hkdfSync (RFC 5869) for standards compliance.
+ *  Produces a 32-byte key suitable for AES-256.
+ */
 export function deriveKey(
   sharedSecret: Buffer,
-  salt: Buffer = Buffer.alloc(0),
+  salt: Buffer = Buffer.alloc(32),
   info: Buffer | string = "secure-doc-exchange/v1"
 ): Buffer {
-  const ikm = sharedSecret;
-  const prk = crypto.createHmac("sha256", salt.length ? salt : Buffer.alloc(32)).update(ikm).digest();
   const infoBuf = Buffer.isBuffer(info) ? info : Buffer.from(info, "utf8");
-  // Single block (32 bytes) is enough for AES-256.
-  const t = crypto.createHmac("sha256", prk).update(Buffer.concat([infoBuf, Buffer.from([1])])).digest();
-  return t.subarray(0, 32);
+  const derived = crypto.hkdfSync("sha256", sharedSecret, salt, infoBuf, 32);
+  return Buffer.from(derived);
 }
 
 // ---------- AES-256-GCM ----------

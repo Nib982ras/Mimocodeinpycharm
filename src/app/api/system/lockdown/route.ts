@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { requireOwner, authErrorResponse } from "@/lib/auth";
 import { recordAudit } from "@/lib/audit";
 import { hubNotify } from "@/lib/hub-client";
+import { revokeAllUserSessions } from "@/lib/session-security";
 
 export const dynamic = "force-dynamic";
 
@@ -36,17 +37,14 @@ export async function POST(req: Request) {
       },
     });
 
-    // 2. Revoke ALL non-owner sessions (their cookies become invalid instantly).
+    // 2. Revoke ALL non-owner sessions using session security utility.
     const nonOwnerUsers = await db.user.findMany({
       where: { role: { not: "OWNER" } },
       select: { id: true },
     });
-    const nonOwnerIds = nonOwnerUsers.map((u) => u.id);
-    if (nonOwnerIds.length > 0) {
-      await db.session.updateMany({
-        where: { userId: { in: nonOwnerIds }, revoked: false },
-        data: { revoked: true, revokedAt: new Date() },
-      });
+    let totalRevoked = 0;
+    for (const user of nonOwnerUsers) {
+      totalRevoked += await revokeAllUserSessions(user.id);
     }
 
     // 3. Broadcast lockdown over the hub so connected clients disconnect.
@@ -69,7 +67,7 @@ export async function POST(req: Request) {
       details: {
         event: "EMERGENCY_LOCKDOWN",
         reason,
-        sessionsRevoked: nonOwnerIds.length,
+        sessionsRevoked: totalRevoked,
       },
       ipAddress: req.headers.get("x-forwarded-for") || undefined,
     });
@@ -78,7 +76,7 @@ export async function POST(req: Request) {
       ok: true,
       lockdown: true,
       reason,
-      sessionsRevoked: nonOwnerIds.length,
+      sessionsRevoked: totalRevoked,
     });
   } catch (err) {
     const r = authErrorResponse(err);

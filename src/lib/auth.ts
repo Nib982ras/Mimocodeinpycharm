@@ -16,15 +16,16 @@ import { db } from "@/lib/db";
  *
  * Security properties:
  *  - Passwords hashed with scrypt (never plaintext).
- *  - Sessions are HMAC-signed JWT-like tokens in an httpOnly, SameSite=none,
+ *  - Sessions are HMAC-signed JWT-like tokens in an httpOnly, SameSite=lax,
  *    Secure cookie. Each token carries a JTI that's tracked in the DB so
  *    sessions can be revoked (on suspension, lockdown, or logout).
+ *  - Session fingerprinting binds sessions to IP + User-Agent.
  *  - 2FA via TOTP (RFC 6238) with backup codes.
  *  - System-state enforcement: when the system is deactivated or in lockdown,
  *    all non-owner logins and document transfers are blocked.
  */
 
-const SESSION_COOKIE = "secure-exchange-session";
+export const SESSION_COOKIE = "secure-exchange-session";
 const SESSION_MAX_AGE = 7 * 24 * 60 * 60; // 7 days, in seconds
 const SECRET_PATH = path.join(process.cwd(), "db", ".session-secret");
 
@@ -52,18 +53,18 @@ function getSecret(): string {
 
 export function hashPassword(password: string): string {
   const salt = crypto.randomBytes(16).toString("hex");
-  const hash = crypto.scryptSync(password, salt, 64).toString("hex");
+  const hash = crypto.scryptSync(password, salt, 64, { N: 65536, r: 8, p: 1 }).toString("hex");
   return `${salt}:${hash}`;
 }
 
 export function verifyPassword(password: string, stored: string): boolean {
   const [salt, hash] = stored.split(":");
   if (!salt || !hash) return false;
-  const test = crypto.scryptSync(password, salt, 64).toString("hex");
+  const test = crypto.scryptSync(password, salt, 64, { N: 65536, r: 8, p: 1 }).toString("hex");
   return crypto.timingSafeEqual(Buffer.from(hash, "hex"), Buffer.from(test, "hex"));
 }
 
-// ---------- Session token (HMAC-signed, JWT-like, with JTI) ----------
+// ---------- Session token (HMAC-signed, JWT-like, with JTI + fingerprint) ----------
 
 export interface SessionPayload {
   uid: string;
@@ -73,6 +74,7 @@ export interface SessionPayload {
   branchCode: string | null;
   jti: string; // unique session id (for revocation)
   exp: number; // epoch seconds
+  fp?: string; // optional session fingerprint for binding
 }
 
 function b64url(buf: Buffer | string): string {
@@ -82,7 +84,7 @@ function b64urlDecode(s: string): Buffer {
   return Buffer.from(s, "base64url");
 }
 
-export function createSessionToken(payload: Omit<SessionPayload, "exp" | "jti">): {
+export function createSessionToken(payload: Omit<SessionPayload, "exp" | "jti"> & { fingerprint?: string }): {
   token: string;
   jti: string;
 } {
@@ -117,7 +119,7 @@ export function verifySessionToken(token: string): SessionPayload | null {
 function cookieOptions() {
   return {
     httpOnly: true,
-    sameSite: "none" as const,
+    sameSite: "lax" as const,
     secure: true,
     path: "/",
     maxAge: SESSION_MAX_AGE,

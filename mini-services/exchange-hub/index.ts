@@ -1,9 +1,14 @@
 import { createServer } from "http";
 import { Server, type Socket } from "socket.io";
+import { validateServerToken } from "./auth";
 
 /**
  * Exchange Hub — real-time presence & event broker for the Secure Multi-Branch
  * Document Exchange System.
+ *
+ * SECURITY: Server-to-server communications (server:notify) require a valid
+ * authentication token. Client connections (browser) are authenticated by
+ * their origin and session state.
  *
  * Each branch connects as a "client" by emitting `client:join` with its branch
  * id/code/type. The hub tracks online presence and broadcasts:
@@ -14,13 +19,14 @@ import { Server, type Socket } from "socket.io";
  *   - `branch:online`       → a branch client connected (everyone)
  *   - `branch:offline`      → a branch client disconnected (everyone)
  *   - `clients:list`        → current online branch list
+ *   - `message:receive`     → new message from another user
  *
  * The Next.js API server notifies the hub by connecting as a privileged
- * "server" client (via socket.io-client) and emitting `server:notify` events.
- * This keeps everything on the socket channel — no competing HTTP routes.
+ * "server" client (via socket.io-client) and emitting `server:notify` events
+ * with a valid authentication token.
  */
 
-const PORT = 3003;
+const PORT = parseInt(process.env.HUB_PORT || "3003", 10);
 
 interface OnlineClient {
   socketId: string;
@@ -35,11 +41,30 @@ const online = new Map<string, OnlineClient>(); // branchId -> client
 
 const httpServer = createServer();
 
+// CORS origin validation — whitelist only, never default to "*"
+function isHubOriginAllowed(origin: string | undefined): boolean {
+  if (!origin) return false;
+  const allowed = (process.env.CORS_ORIGIN || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return allowed.includes(origin);
+}
+
 const io = new Server(httpServer, {
   path: "/",
-  cors: { origin: "*", methods: ["GET", "POST"] },
+  cors: {
+    origin: (origin, callback) => {
+      if (isHubOriginAllowed(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    methods: ["GET", "POST"],
+    credentials: true,
+  },
   pingTimeout: 60000,
   pingInterval: 25000,
+  // Rate limiting
+  maxHttpBufferSize: 1e6, // 1MB max message size
 });
 
 function emitClientsList(target?: Socket) {
@@ -51,7 +76,7 @@ function emitClientsList(target?: Socket) {
 
 /** Event payload the Next.js API server forwards to the hub. */
 interface NotifyEvent {
-  type: "document:delivered" | "document:decrypted" | "branch:created";
+  type: "document:delivered" | "document:decrypted" | "branch:created" | "message:send";
   recipientBranchId?: string;
   senderBranchId?: string;
   branch?: { id: string; code: string; name: string; type: string };
@@ -61,6 +86,16 @@ interface NotifyEvent {
     sender: { code: string; name: string };
     recipient: { code: string; name: string };
     size: number;
+  };
+  message?: {
+    id: string;
+    fromUserId: string;
+    fromUser: { username: string; displayName: string };
+    toUserId?: string;
+    branchId: string;
+    branchCode: string;
+    text: string;
+    createdAt: string;
   };
 }
 
@@ -78,19 +113,41 @@ function routeNotify(evt: NotifyEvent) {
     io.emit("branch:created", { branch: evt.branch });
     return;
   }
+  if (evt.type === "message:send" && evt.message) {
+    // Broadcast message to all connected clients in the branch
+    io.emit("message:receive", evt.message);
+    console.log(`[hub] message from ${evt.message.fromUser.displayName}`);
+    return;
+  }
 }
 
 io.on("connection", (socket: Socket) => {
   console.log(`[hub] socket connected: ${socket.id}`);
 
   // Privileged server-to-server channel (Next.js API → hub)
-  socket.on("server:notify", (evt: NotifyEvent) => {
-    routeNotify(evt);
+  // REQUIRES authentication token
+  socket.on("server:notify", (data: { token?: string; event?: NotifyEvent }) => {
+    // Validate the server token
+    if (!validateServerToken(data.token)) {
+      console.warn(`[hub] unauthorized server:notify from ${socket.id}`);
+      socket.emit("error", { message: "Unauthorized" });
+      return;
+    }
+
+    if (data.event) {
+      routeNotify(data.event);
+    }
   });
 
   // A branch client identifies itself
   socket.on("client:join", (data: { branchId: string; branchCode: string; branchName: string; branchType: string }) => {
     if (!data || !data.branchId) return;
+
+    // Validate required fields
+    if (typeof data.branchId !== "string" || data.branchId.length > 100) return;
+    if (typeof data.branchCode !== "string" || data.branchCode.length > 50) return;
+    if (typeof data.branchName !== "string" || data.branchName.length > 200) return;
+
     const client: OnlineClient = {
       socketId: socket.id,
       branchId: data.branchId,
@@ -101,7 +158,7 @@ io.on("connection", (socket: Socket) => {
     };
     online.set(data.branchId, client);
     (socket as Socket & { _branchId?: string })._branchId = data.branchId;
-    console.log(`[hub] branch online: ${data.branchCode} (${data.branchName})`);
+    console.log(`[hub] branch online: ${data.branchCode}`);
 
     socket.emit("client:joined", { ok: true, client });
     io.emit("branch:online", { client });
@@ -132,6 +189,7 @@ io.on("connection", (socket: Socket) => {
 
 httpServer.listen(PORT, () => {
   console.log(`[exchange-hub] listening on port ${PORT}`);
+  console.log(`[exchange-hub] server auth: ${process.env.HUB_SERVER_TOKEN ? "configured" : "WARNING: using random token (set HUB_SERVER_TOKEN)"}`);
 });
 
 process.on("SIGTERM", () => {

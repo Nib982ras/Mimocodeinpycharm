@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { requireSecurityAdmin, authErrorResponse, ROLE_RANK } from "@/lib/auth";
 import { recordAudit } from "@/lib/audit";
+import { revokeAllUserSessions } from "@/lib/session-security";
 
 export const dynamic = "force-dynamic";
 
@@ -43,20 +44,17 @@ export async function POST(
           suspendedBy: admin.username,
         },
       });
-      // Revoke all their active sessions.
-      await db.session.updateMany({
-        where: { userId: id, revoked: false },
-        data: { revoked: true, revokedAt: new Date() },
-      });
+      // Revoke all their active sessions using session security utility.
+      const revokedCount = await revokeAllUserSessions(id);
       await recordAudit({
         action: "USER_SUSPEND",
         actor: admin.username,
         actorId: admin.id,
         status: "SUCCESS",
-        details: { target: target.username, targetRole: target.role, reason: reason || null },
+        details: { target: target.username, targetRole: target.role, reason: reason || null, sessionsRevoked: revokedCount },
         ipAddress: req.headers.get("x-forwarded-for") || undefined,
       });
-      return NextResponse.json({ ok: true, status: "SUSPENDED" });
+      return NextResponse.json({ ok: true, status: "SUSPENDED", sessionsRevoked: revokedCount });
     } else {
       await db.user.update({
         where: { id },
