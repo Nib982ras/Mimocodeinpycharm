@@ -66,7 +66,8 @@ export async function GET(req: Request) {
     return NextResponse.json({
       ok: true,
       counts: Object.fromEntries(actionCounts.map((a) => [a.action, a._count])),
-      ...result,
+      logs: result.data,
+      pagination: result.pagination,
     });
   } catch (err) {
     const r = authErrorResponse(err);

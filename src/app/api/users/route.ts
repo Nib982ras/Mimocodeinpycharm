@@ -69,7 +69,7 @@ export async function GET(req: Request) {
       createdAt: u.createdAt.toISOString(),
     }));
 
-    return NextResponse.json({ ok: true, actor: admin.username, ...result });
+    return NextResponse.json({ ok: true, actor: admin.username, users: result.data, pagination: result.pagination });
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Failed to list users" }, { status: 500 });

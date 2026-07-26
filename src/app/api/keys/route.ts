@@ -45,7 +45,7 @@ export async function GET(req: Request) {
       publicKeyPem: k.publicKeyPem,
     }));
 
-    return NextResponse.json({ ok: true, ...result });
+    return NextResponse.json({ ok: true, keys: result.data, pagination: result.pagination });
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Failed to list keys" }, { status: 500 });

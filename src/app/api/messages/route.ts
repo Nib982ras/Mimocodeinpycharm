@@ -56,7 +56,7 @@ export async function GET(req: NextRequest) {
       createdAt: m.createdAt.toISOString(),
     }));
 
-    return NextResponse.json({ ok: true, ...result });
+    return NextResponse.json({ ok: true, messages: result.data, pagination: result.pagination });
   } catch (err: unknown) {
     const r = authErrorResponse(err);
     if (r) return r;

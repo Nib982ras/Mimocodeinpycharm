@@ -79,7 +79,7 @@ export async function GET(req: Request) {
       decryptedAt: d.decryptedAt?.toISOString() ?? null,
     }));
 
-    return NextResponse.json({ ok: true, ...result });
+    return NextResponse.json({ ok: true, documents: result.data, pagination: result.pagination });
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Failed to list documents" }, { status: 500 });
@@ -195,7 +195,10 @@ export async function POST(req: Request) {
         writeStream.write(value);
       }
     } finally {
-      writeStream.end();
+      await new Promise<void>((resolve, reject) => {
+        writeStream.end(() => resolve());
+        writeStream.on("error", reject);
+      });
     }
 
     // Read the plaintext from the temp file (already validated size, so this is safe)
@@ -282,6 +285,7 @@ export async function POST(req: Request) {
       },
     });
   } catch (err) {
+    console.error("[documents/upload] Error:", err);
     // Clean up temp file on error
     if (tempFilePath) {
       try { fs.unlinkSync(tempFilePath); } catch { /* ignore cleanup error */ }

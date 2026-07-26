@@ -70,7 +70,7 @@ export async function GET(req: Request) {
         : null,
     }));
 
-    return NextResponse.json({ ok: true, actor: me.username, ...result });
+    return NextResponse.json({ ok: true, actor: me.username, licenses: result.data, pagination: result.pagination });
   } catch (err) {
     const r = authErrorResponse(err);
     return r ?? NextResponse.json({ ok: false, error: "Failed to list licenses" }, { status: 500 });
